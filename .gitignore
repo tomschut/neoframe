@@ -1,0 +1,11 @@
+build/
+sdkconfig
+sdkconfig.old
+.tools/
+*.bin
+__pycache__/
+documentation/
+.cache/
+.ccache/
+.gitconfig
+PROJECT-1-neoframe-firmware.md
