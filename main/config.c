@@ -12,7 +12,7 @@ void nf_config_default(nf_config *c) {
 bool nf_config_valid(const nf_config *c) {
 #define TERMINATED(f) if (!memchr(c->f, 0, sizeof(c->f))) return false
     TERMINATED(wifi_ssid); TERMINATED(wifi_pass); TERMINATED(image_url); TERMINATED(config_url);
-    TERMINATED(active_start); TERMINATED(active_end); TERMINATED(power_profile);
+    TERMINATED(firmware_url); TERMINATED(active_start); TERMINATED(active_end); TERMINATED(power_profile);
 #undef TERMINATED
     size_t n = strlen(c->wifi_pass);
     if (n && n < 8) return false;
@@ -20,6 +20,7 @@ bool nf_config_valid(const nf_config *c) {
         if (!strchr("0123456789abcdefABCDEF", c->wifi_pass[i])) return false;
     return c->version == 1 && c->update_interval_s >= NF_MIN_INTERVAL && c->update_interval_s <= NF_DAY &&
         nf_url_valid(c->image_url, true) && nf_url_valid(c->config_url, true) &&
+        nf_url_valid(c->firmware_url, true) &&
         nf_time_valid(c->active_start) && nf_time_valid(c->active_end) && c->led_enabled <= 1 &&
         (!strcmp(c->power_profile, "low_power") || !strcmp(c->power_profile, "always_on"));
 }
@@ -43,9 +44,9 @@ bool nf_config_parse(const char *json, const nf_config *base, nf_config *out, bo
     if (!cJSON_IsString(item) || strlen(item->valuestring) >= sizeof(next.f)) ok = false; \
     else strcpy(next.f, item->valuestring); \
 }
-        if (!strcmp(k, "wifi_ssid") || !strcmp(k, "wifi_pass") || !strcmp(k, "config_url")) {
+        if (!strcmp(k, "wifi_ssid") || !strcmp(k, "wifi_pass") || !strcmp(k, "config_url") || !strcmp(k, "firmware_url")) {
             if (remote) { ok = false; continue; }
-            STR_FIELD(wifi_ssid) else STR_FIELD(wifi_pass) else STR_FIELD(config_url)
+            STR_FIELD(wifi_ssid) else STR_FIELD(wifi_pass) else STR_FIELD(config_url) else STR_FIELD(firmware_url)
         } else STR_FIELD(image_url)
         else STR_FIELD(active_start)
         else STR_FIELD(active_end)

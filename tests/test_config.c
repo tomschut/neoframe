@@ -42,6 +42,17 @@ int main(void) {
         if (i>4) assert(!nf_config_parse(bad[i],&base,&out,false));
     }
     assert(nf_config_parse("{\"wifi_ssid\":\"My WiFi\",\"wifi_pass\":\"abcdefgh\",\"config_url\":\"http://host/settings\"}",&out,&base,false));
+    /* firmware_url: http or https like other URLs, never remote-settable
+     * even alongside an otherwise-complete valid remote payload; fine over
+     * serial or the local settings page (both parse with remote=false). */
+    const char *remote_with_firmware="{\"update_interval_s\":600,\"image_url\":\"http://host/frame\","
+        "\"active_start\":\"08:00\",\"active_end\":\"00:00\",\"led_enabled\":true,"
+        "\"firmware_url\":\"https://host/fw.bin\"}";
+    assert(!nf_config_parse(remote_with_firmware,&base,&out,true));
+    assert(nf_config_parse("{\"firmware_url\":\"https://host/fw.bin\"}",&base,&out,false));
+    assert(!strcmp(out.firmware_url,"https://host/fw.bin"));
+    assert(nf_config_parse("{\"firmware_url\":\"http://host/fw.bin\"}",&base,&out,false));
+    assert(!strcmp(out.firmware_url,"http://host/fw.bin"));
     assert(nf_config_save(&base)==ESP_OK);
     assert(nf_config_load(&reloaded)==ESP_OK && !memcmp(&base,&reloaded,sizeof(base)));
     fail_commit=1; out=base; strcpy(out.wifi_ssid,"replacement");

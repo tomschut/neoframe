@@ -4,6 +4,7 @@ sdkconfig.old
 .tools/
 *.bin
 __pycache__/
+backups/
 documentation/
 .cache/
 .ccache/

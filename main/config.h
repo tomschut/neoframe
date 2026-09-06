@@ -6,6 +6,7 @@ typedef struct {
     uint32_t update_interval_s;
     char wifi_ssid[33], wifi_pass[65];
     char image_url[512], config_url[512];
+    char firmware_url[512]; /* HTTPS only; serial/portal-set only, never remote */
     char active_start[6], active_end[6];
     char power_profile[16];
     uint8_t led_enabled;

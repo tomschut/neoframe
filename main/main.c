@@ -1,6 +1,10 @@
 #include "config.h"
 #include "http.h"
 #include "panel.h"
+#include "portal.h"
+#include "webui.h"
+#include "logbuf.h"
+#include "ota.h"
 #include "nvs_flash.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
@@ -95,7 +99,23 @@ static bool apply(nf_config *c, const char *json, bool remote, uint32_t *generat
     ESP_LOGI(TAG,"Configuration saved (version 1); P0 uses always-on polling");
     return true;
 }
+/* Blocks running the AP-mode captive portal until it succeeds or fails
+ * structurally (resource/hardware failure - a wrong password just keeps the
+ * portal waiting, it does not return here). Returns true if a config was
+ * accepted and saved. */
+static bool provision(nf_config *c, QueueHandle_t serial_messages) {
+    nf_config provisioned;
+    if (nf_portal_provision(c,&provisioned,serial_messages)!=ESP_OK) {
+        ESP_LOGE(TAG,"Captive portal failed; serial configuration remains available");
+        return false;
+    }
+    esp_err_t se=nf_config_save(&provisioned);
+    if (se!=ESP_OK) ESP_LOGE(TAG,"Provisioned configuration not saved: %s",esp_err_to_name(se));
+    *c=provisioned;
+    return true;
+}
 void app_main(void) {
+    nf_logbuf_init();
     ESP_LOGI(TAG,"Wake reason %d",esp_sleep_get_wakeup_cause());
     /* Never erase NVS as an automatic recovery strategy: credentials matter. */
     esp_err_t e=nvs_flash_init();
@@ -109,6 +129,11 @@ void app_main(void) {
     if (!wifi_events || !serial_messages || !settings_jobs || !settings_results) {
         ESP_LOGE(TAG,"Cannot allocate task queues"); return;
     }
+    /* Started before WiFi/portal setup so serial configuration stays available
+     * even while a captive portal session is blocking app_main below. */
+    if (xTaskCreate(serial_task,"serial_config",4096,NULL,2,NULL)!=pdPASS)
+        ESP_LOGE(TAG,"Serial configuration task unavailable");
+    ESP_LOGI(TAG,"Send a JSON line with wifi_ssid, wifi_pass, image_url and optional config_url at 115200 baud");
     ESP_ERROR_CHECK(esp_netif_init()); ESP_ERROR_CHECK(esp_event_loop_create_default());
     if (!esp_netif_create_default_wifi_sta()) { ESP_LOGE(TAG,"Cannot create STA interface"); return; }
     wifi_init_config_t init=WIFI_INIT_CONFIG_DEFAULT(); ESP_ERROR_CHECK(esp_wifi_init(&init));
@@ -116,33 +141,65 @@ void app_main(void) {
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT,IP_EVENT_STA_GOT_IP,wifi_event,NULL));
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA)); ESP_ERROR_CHECK(esp_wifi_start());
-    credentials(&c);
+    if (!*c.wifi_ssid) {
+        ESP_LOGI(TAG,"No WiFi configured; starting captive portal (serial JSON still works too)");
+        provision(&c,serial_messages);
+    }
+    /* A successful portal verify already connected with these exact
+     * credentials; reconnecting here is redundant and, on WPA3-SAE
+     * networks, can trip the AP's anti-clogging rate limit for several
+     * seconds. Only (re)apply credentials if we're not already online. */
+    if (!online()) credentials(&c);
     sntp_setoperatingmode(SNTP_OPMODE_POLL); sntp_setservername(0,"pool.ntp.org"); sntp_init();
-    if (xTaskCreate(serial_task,"serial_config",4096,NULL,2,NULL)!=pdPASS)
-        ESP_LOGE(TAG,"Serial configuration task unavailable");
     if (xTaskCreate(settings_task,"settings",8192,NULL,1,NULL)!=pdPASS)
         ESP_LOGW(TAG,"Settings task unavailable; image loop continues");
-    ESP_LOGI(TAG,"Send a JSON line with wifi_ssid, wifi_pass, image_url and optional config_url at 115200 baud");
+    /* Always-on settings page: safe to start unconditionally here, since any
+     * captive-portal HTTP server above has already been stopped by now. */
+    if (nf_webui_start(&c,serial_messages)!=ESP_OK)
+        ESP_LOGW(TAG,"Settings page unavailable; serial configuration still works");
     uint8_t *candidate=heap_caps_malloc(NF_FRAME_SIZE,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
     uint8_t *cached=heap_caps_malloc(NF_FRAME_SIZE,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
     if (!candidate || !cached) ESP_LOGE(TAG,"PSRAM frame allocation failed; serial configuration remains available");
-    bool panel_ready=false, have_frame=false;
+    bool panel_ready=false, have_frame=false, ota_confirmed=false;
     nf_validator validator={0}; char validator_url[512]={0};
-    uint32_t generation=0, backoff=1;
+    uint32_t generation=0, backoff=1, failed_connects=0;
     int64_t connect_at=0, next_poll=0, last_refresh=0;
     /* A full boot cooldown also protects against rapid power cycling. */
     int64_t render_after=seconds()+NF_MIN_INTERVAL;
     for (;;) {
         char *line;
         while (xQueueReceive(serial_messages,&line,0)==pdTRUE) {
-            if (apply(&c,line,false,&generation)) { next_poll=0; connect_at=0; backoff=1; }
+            /* Debug-only: a deliberate, manually-typed override over the
+             * trusted serial line, distinct from the automatic refresh loop
+             * NF_MIN_INTERVAL protects against. Not part of the JSON schema. */
+            if (!strcmp(line,"force")) {
+                render_after=0; next_poll=0;
+                ESP_LOGW(TAG,"Forced refresh requested via serial (debug)");
+            } else if (!strcmp(line,"ota")) {
+                if (*c.firmware_url) {
+                    esp_err_t oe=nf_ota_check_and_apply(c.firmware_url);
+                    if (oe!=ESP_OK) ESP_LOGE(TAG,"OTA check failed: %s",esp_err_to_name(oe));
+                } else ESP_LOGW(TAG,"No firmware_url configured; nothing to check");
+            } else if (apply(&c,line,false,&generation)) { next_poll=0; connect_at=0; backoff=1; }
             free(line);
         }
         int64_t now=seconds();
-        if (online()) backoff=1;
+        if (online()) {
+            backoff=1; failed_connects=0;
+            if (!ota_confirmed) { nf_ota_confirm_healthy(); ota_confirmed=true; }
+        }
         else if (*c.wifi_ssid && now>=connect_at) {
             esp_wifi_connect(); connect_at=now+backoff;
             if (backoff<60) backoff=backoff*2>60?60:backoff*2;
+            if (++failed_connects>=NF_MAX_CONNECT_FAILURES) {
+                ESP_LOGW(TAG,"%u consecutive connection failures; reopening captive portal",
+                    (unsigned)failed_connects);
+                nf_webui_stop();
+                if (provision(&c,serial_messages) && !online()) credentials(&c);
+                if (nf_webui_start(&c,serial_messages)!=ESP_OK)
+                    ESP_LOGW(TAG,"Settings page unavailable; serial configuration still works");
+                failed_connects=0; backoff=1; connect_at=0;
+            }
         }
         if (now>=next_poll && now>=render_after && candidate && cached) {
             settings_result *r;

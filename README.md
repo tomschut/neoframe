@@ -2,11 +2,10 @@
 
 P0 firmware for Good Display ESP32-133C02 / GDEP133C02. The source implements
 persistent WiFi STA, native packed-image polling and independent optional settings
-polling. It has been compiled for ESP32-S3; physical panel operation, WiFi persistence
-across real power loss and factory restore are **not yet hardware verified**.
-
-The user explicitly waived the backup gate for software development on 2026-09-05,
-reporting that a replacement binary is ready. No device was flashed or erased.
+polling. It has been compiled and flashed to real ESP32-S3 hardware; a full factory
+flash dump was taken and its restore verified (write-back + hash match) before any
+custom flash, per the project's backup gate. Physical panel color/orientation
+fidelity against the GD reference image is still pending a side-by-side comparison.
 The original project instructions are retained unchanged.
 
 ## Build and test
@@ -26,19 +25,69 @@ podman run --rm --userns=keep-id -v "$PWD:/project:Z" -w /project docker.io/espr
 ```
 
 Output: `build/neoframe.bin`, `build/bootloader/bootloader.bin`,
-`build/partition_table/partition-table.bin`, plus `build/flasher_args.json`.
-These are separate application, bootloader and partition artifacts, not a full
-factory-recovery image. The build does not flash hardware.
+`build/partition_table/partition-table.bin`, `build/ota_data_initial.bin`, plus
+`build/flasher_args.json` (has the exact offsets/flags to use). These are separate
+application, bootloader and partition artifacts, not a full factory-recovery image.
+The build does not flash hardware.
 
 16 MB flash and octal PSRAM settings come from the GD example's `sdkconfig` and
 module declaration. Verify that the actual board matches before using these images.
-The custom partition layout is IDF's `singleapp_large`: NVS at 0x9000, PHY at 0xf000,
-application at 0x10000. This is **not the factory image-slot layout**, and flashing
-it would replace the factory partition table. No OTA is implemented.
+The custom partition layout (`partitions.csv`) is OTA-capable: NVS at 0x9000, PHY at
+0xf000, `otadata` at 0x10000, and two 1.875 MB app slots (`ota_0`/`ota_1`) at 0x20000
+and 0x200000. This is **not the factory image-slot layout**, and flashing it replaces
+the factory partition table entirely - the same backup gate applies. Moving from an
+already-flashed single-app build to this OTA-capable table needs one more full
+wipe+reflash (bootloader + partition table + app); after that, updates can go over
+the air (see "Firmware updates (OTA)" below).
 
 ## Initial configuration and recovery
 
-P0 uses USB serial configuration at **115200 baud**, one JSON object per line.
+On first boot (no WiFi credentials stored), the device opens a **WiFi access
+point** named `NeoFrame-XXXXXX` (last 3 MAC bytes), password `1234567890`,
+and a captive portal. Connect a phone or laptop to it; most OSes pop the setup page
+automatically, or open `http://192.168.4.1/` manually. The page collects
+WiFi network name/password, image URL, refresh interval (minutes), and the
+active-window start/end times. Submitting the form live-tests the WiFi
+credentials (up to 15s) before saving anything — a wrong password redisplays
+the form with an error rather than persisting bad credentials. On success the
+portal closes, the AP shuts down, and the device proceeds as a normal WiFi
+client. The portal starts when `wifi_ssid` is empty in NVS, or when a
+saved WiFi network fails to connect **10 consecutive attempts** in a row
+(backoff-capped at 60s/attempt, so roughly 5 minutes of retrying first) —
+either way the credentials on file are left untouched unless the portal
+succeeds, so a transient outage doesn't erase working config, and the
+always-on settings page (below) is briefly stopped and restarted around
+this so both HTTP servers don't fight over port 80.
+
+## Always-on settings page
+
+Once connected to WiFi, the device also serves a persistent settings page at
+`http://<device-ip>/` (port 80; the IP is logged as `sta ip:` at connect
+time, or check your router's DHCP client list). It exposes `image_url`,
+`config_url`, `firmware_url`, refresh interval, active window, `led_enabled`,
+and `power_profile` — everything the remote `config_url` path can already
+change, plus `firmware_url` on top — plus a "Force reload now" button that
+bypasses the poll interval immediately, and a "Check & install firmware
+update now" button (see "Firmware updates (OTA)" below). **It never exposes
+WiFi credentials** — changing which network the device joins is still
+restricted to the AP-mode portal (needs the WPA2 password) or serial (needs
+a USB cable). `firmware_url` is deliberately not held to that same
+restriction: once mounted, this page is realistically the only thing you can
+reach, so `firmware_url` is settable here too — it has no authentication
+beyond being on your LAN at all, so anyone on your network can point the
+device at a firmware image of their choosing and trigger an install. It also
+links to `/logs` (recent log output, plain text).
+
+The same effect as "Force reload now" is available over serial at any time:
+send the literal line `force` (not JSON) to bypass both the poll interval
+and the render-spacing guard on the next loop tick. Sending `ota` likewise
+triggers an immediate OTA check against the configured `firmware_url`.
+
+Serial configuration (below) remains available at all times, including
+while the portal is up: a valid serial JSON line immediately satisfies
+provisioning and closes the portal, whichever arrives first.
+
+P0 also accepts USB serial configuration at **115200 baud**, one JSON object per line.
 Connect a serial terminal without local echo and send (replace the example values):
 
 ```json
@@ -60,6 +109,34 @@ NVS's 15-character key limit. Existing stock firmware credentials are not import
 Malformed/unknown-version blobs use safe defaults; NVS initialization errors are
 reported without automatically erasing the partition.
 
+## Firmware updates (OTA)
+
+Set `firmware_url` over serial or the always-on settings page (never through
+the remote `config_url` path - the AP-mode portal's form doesn't currently
+have a field for it either, only used for first-time setup) to an
+`http://` or `https://` URL serving an ESP-IDF app image. Trigger a check either by
+sending the literal serial line `ota`, or via "Check & install firmware
+update now" on the always-on settings page (which only ever fetches the URL
+already on file). The check compares the fetched image's embedded version string against
+the running one (`esp_https_ota_get_img_desc`) and skips the flash/reboot
+entirely if they match, so re-checking an unchanged URL is cheap. On an
+actual update it writes to the inactive OTA slot and reboots into it
+immediately on success.
+
+Rollback safety: `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` is on, and a freshly
+flashed OTA image stays in `ESP_OTA_IMG_PENDING_VERIFY` until the device
+successfully connects to WiFi at least once (`nf_ota_confirm_healthy`) — if
+it never gets that far (crash-loops, bad build), the bootloader automatically
+reverts to the previous slot on the next boot. There is currently no
+automatic/periodic OTA check; it is manual-trigger-only in this build.
+
+## Logging
+
+`ESP_LOG` output is also captured into a 16 KB RAM ring buffer (ANSI color
+codes stripped) from boot, in addition to the normal serial console — nothing
+is redirected away from serial. View it at `/logs` on the always-on settings
+page (plain text). The buffer is not persisted across reboots.
+
 ## Image contract
 
 HTTP(S) 200 must contain exactly **960000 bytes**, with no image-file header:
@@ -68,6 +145,8 @@ go to controller M, then the second 300 bytes to S in the second transfer pass.
 Each nibble must be one of `0,1,2,3,5,6` (black, white, yellow, red, blue, green).
 This follows the supplied native GD example; landscape orientation and compatibility
 with the stock `/upload` format still require a physical reference-image comparison.
+The device always expects this native layout - the server is responsible for
+serving an already-correctly-oriented frame; there is no on-device rotation.
 
 The entire response is validated before touching the panel. ETag is preferred over
 Last-Modified. Validators are adopted only after successful rendering and are tied
@@ -110,10 +189,14 @@ image loop's control path.
 ## Deferred P1 features
 
 The current firmware uses awake FreeRTOS delays. Deep sleep, active-window
-enforcement, captive portal, regular power-rail gating, LED control, battery ADC,
-compatibility endpoints and OTA are deferred until P0 is proven on hardware, as
-required by the project. `active_start`, `active_end`, `power_profile` and
-`led_enabled` are validated and stored but have no P1 behavior yet.
+enforcement, regular power-rail gating, LED control, battery ADC, and
+compatibility endpoints are deferred until P0 is proven on hardware, as
+required by the project. OTA (manual-trigger only, see above) has been
+implemented ahead of that gate at the user's explicit request. `active_start`,
+`active_end`, `power_profile` and
+`led_enabled` are validated, stored, and settable through the captive portal
+or serial/remote config, but have no runtime behavior yet (no active-window
+enforcement, no power-rail gating in sleep, no low-power mode).
 
 The panel performs the GD POF command after refresh. BUSY waits have a 120-second
 limit; on a panel error, SW_C is deasserted to prevent leaving the boost supply on.
@@ -133,7 +216,12 @@ add `--reference` followed by the quoted path to the supplied `main/image.h`.
 To serve your own already-packed image, use `--frame path/to/frame.bin`.
 
 1. Verify the available restore binary and board identity before a later manual flash.
-2. Provision over serial; wait through the initial 180-second refresh guard.
+2. Erase NVS or use a blank device; confirm the `NeoFrame-XXXXXX` AP appears and the
+   captive portal page loads. Submit a wrong password and confirm it's rejected with
+   an error and nothing is saved; then submit correct values and confirm it saves,
+   the AP closes, and the device comes up as a WiFi client. Separately, confirm a
+   serial JSON line sent while the portal is still open provisions immediately too.
+   Wait through the initial 180-second refresh guard.
 3. Compare color bars and the GD reference image, checking both halves and orientation.
 4. Reboot and power-cycle; confirm STA reconnects with the saved credentials.
 5. Check `/frame` returns 200 then 304; change source content and restart server for a new ETag.
