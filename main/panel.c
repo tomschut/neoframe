@@ -89,3 +89,6 @@ done:
     return e;
 #undef TRY
 }
+void nf_panel_sleep(void) {
+    gpio_set_level(SW, 0);
+}

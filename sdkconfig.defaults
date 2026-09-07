@@ -16,3 +16,12 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
 # (client hints, cookies, etc.) - both the captive portal and the always-on
 # settings page hit "header too long" on phones without this.
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=2048
+# esp_https_ota refuses any transfer with no server verification (no TLS,
+# no cert) unless this is set - a second, independent gate from our own
+# HTTP-allowed firmware_url validation. Explicit per the user's requirement
+# that OTA work over plain HTTP on the LAN.
+CONFIG_OTA_ALLOW_HTTP=y
+# Power management framework, needed for esp_pm_configure()/automatic light
+# sleep used by the "pause" state. Frequency is kept fixed (see light_sleep()
+# in main.c) - only the tickless-idle light-sleep behavior is used, not DFS.
+CONFIG_PM_ENABLE=y

@@ -13,6 +13,7 @@
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
 #include "esp_sleep.h"
+#include "esp_pm.h"
 #include "lwip/apps/sntp.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -35,6 +36,19 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     if (base==WIFI_EVENT && id==WIFI_EVENT_STA_DISCONNECTED) xEventGroupClearBits(wifi_events,1);
 }
 static bool online(void) { return xEventGroupGetBits(wifi_events)&1; }
+/* Toggles automatic light sleep for idle CPU time. Frequency is fixed
+ * (max==min, no dynamic scaling) deliberately: DFS combined with octal
+ * PSRAM at 80MHz has timing edge cases on some ESP32-S3 configs that
+ * haven't been validated on this hardware. Light sleep itself (clocks
+ * parked at the same frequency during idle, no retiming) is the
+ * well-trodden, low-risk part. WiFi is left associated throughout -
+ * see wifi_power_save below for the WiFi-side half of this. */
+static void light_sleep(bool enable) {
+    esp_pm_config_esp32s3_t pm={.max_freq_mhz=CONFIG_ESP32S3_DEFAULT_CPU_FREQ_MHZ,
+        .min_freq_mhz=CONFIG_ESP32S3_DEFAULT_CPU_FREQ_MHZ,.light_sleep_enable=enable};
+    esp_err_t e=esp_pm_configure(&pm);
+    if (e!=ESP_OK) ESP_LOGW(TAG,"Power management configure failed: %s",esp_err_to_name(e));
+}
 static void credentials(const nf_config *c) {
     esp_wifi_disconnect(); xEventGroupClearBits(wifi_events,1);
     wifi_config_t w={0};
@@ -155,7 +169,8 @@ void app_main(void) {
         ESP_LOGW(TAG,"Settings task unavailable; image loop continues");
     /* Always-on settings page: safe to start unconditionally here, since any
      * captive-portal HTTP server above has already been stopped by now. */
-    if (nf_webui_start(&c,serial_messages)!=ESP_OK)
+    bool paused=false;
+    if (nf_webui_start(&c,serial_messages,&paused)!=ESP_OK)
         ESP_LOGW(TAG,"Settings page unavailable; serial configuration still works");
     uint8_t *candidate=heap_caps_malloc(NF_FRAME_SIZE,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
     uint8_t *cached=heap_caps_malloc(NF_FRAME_SIZE,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
@@ -180,6 +195,18 @@ void app_main(void) {
                     esp_err_t oe=nf_ota_check_and_apply(c.firmware_url);
                     if (oe!=ESP_OK) ESP_LOGE(TAG,"OTA check failed: %s",esp_err_to_name(oe));
                 } else ESP_LOGW(TAG,"No firmware_url configured; nothing to check");
+            } else if (!strcmp(line,"pause")) {
+                paused=true;
+                nf_panel_sleep();
+                esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+                light_sleep(true);
+                ESP_LOGW(TAG,"Paused: panel power off, light sleep on, WiFi stays connected");
+            } else if (!strcmp(line,"resume")) {
+                paused=false;
+                next_poll=0;
+                light_sleep(false);
+                esp_wifi_set_ps(WIFI_PS_NONE);
+                ESP_LOGW(TAG,"Resumed");
             } else if (apply(&c,line,false,&generation)) { next_poll=0; connect_at=0; backoff=1; }
             free(line);
         }
@@ -196,12 +223,12 @@ void app_main(void) {
                     (unsigned)failed_connects);
                 nf_webui_stop();
                 if (provision(&c,serial_messages) && !online()) credentials(&c);
-                if (nf_webui_start(&c,serial_messages)!=ESP_OK)
+                if (nf_webui_start(&c,serial_messages,&paused)!=ESP_OK)
                     ESP_LOGW(TAG,"Settings page unavailable; serial configuration still works");
                 failed_connects=0; backoff=1; connect_at=0;
             }
         }
-        if (now>=next_poll && now>=render_after && candidate && cached) {
+        if (!paused && now>=next_poll && now>=render_after && candidate && cached) {
             settings_result *r;
             while (xQueueReceive(settings_results,&r,0)==pdTRUE) {
                 if (r->generation==generation) apply(&c,r->json,true,&generation);

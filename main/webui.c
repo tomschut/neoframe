@@ -13,6 +13,7 @@ static const nf_config *s_config;
 static QueueHandle_t s_serial_messages;
 static char s_error[160];
 static httpd_handle_t s_server;
+static const bool *s_paused;
 
 static esp_err_t enqueue(const char *line) {
     char *copy=strdup(line);
@@ -66,6 +67,10 @@ static esp_err_t send_page(httpd_req_t *req) {
         "<form method=post action=/ota>"
         "<button type=submit>Check &amp; install firmware update now</button>"
         "</form>"
+        "<h3>Refresh state</h3><p>Currently: <strong>%s</strong></p>"
+        "<form method=post action=/%s>"
+        "<button type=submit>%s</button>"
+        "</form>"
         "<h3>Logs</h3><p><a href=/logs>View recent log output</a></p>",
         *s_error?"<div class=err>":"", s_error, *s_error?"</div>":"",
         image_url, config_url, (int)(s_config->update_interval_s/60),
@@ -73,7 +78,10 @@ static esp_err_t send_page(httpd_req_t *req) {
         strcmp(s_config->power_profile,"low_power")?"":" selected",
         strcmp(s_config->power_profile,"always_on")?"":" selected",
         s_config->led_enabled?" checked":"",
-        version, firmware_url);
+        version, firmware_url,
+        s_paused&&*s_paused?"Paused":"Active",
+        s_paused&&*s_paused?"resume":"pause",
+        s_paused&&*s_paused?"Resume":"Pause");
     httpd_resp_set_type(req,"text/html");
     httpd_resp_send(req,html,n);
     free(html);
@@ -176,10 +184,35 @@ static esp_err_t handle_logs(httpd_req_t *req) {
     return ESP_OK;
 }
 
-esp_err_t nf_webui_start(const nf_config *config, QueueHandle_t serial_messages) {
-    s_config=config; s_serial_messages=serial_messages; *s_error=0;
+static esp_err_t handle_pause(httpd_req_t *req) {
+    if (enqueue("pause")!=ESP_OK) ESP_LOGW(TAG,"Settings queue full; try again");
+    httpd_resp_set_type(req,"text/html");
+    httpd_resp_sendstr(req,
+        "<!doctype html><title>NeoFrame</title>"
+        "<body style=\"font-family:sans-serif;max-width:420px;margin:40px auto;text-align:center\">"
+        "<h2>Paused</h2><p>Automatic refresh is off - the panel keeps showing its last image.</p>"
+        "<p><a href=/>Back</a></p>");
+    return ESP_OK;
+}
+
+static esp_err_t handle_resume(httpd_req_t *req) {
+    if (enqueue("resume")!=ESP_OK) ESP_LOGW(TAG,"Settings queue full; try again");
+    httpd_resp_set_type(req,"text/html");
+    httpd_resp_sendstr(req,
+        "<!doctype html><title>NeoFrame</title>"
+        "<body style=\"font-family:sans-serif;max-width:420px;margin:40px auto;text-align:center\">"
+        "<h2>Resumed</h2><p>Automatic refresh is back on.</p>"
+        "<p><a href=/>Back</a></p>");
+    return ESP_OK;
+}
+
+esp_err_t nf_webui_start(const nf_config *config, QueueHandle_t serial_messages, const bool *paused) {
+    s_config=config; s_serial_messages=serial_messages; s_paused=paused; *s_error=0;
     httpd_config_t cfg=HTTPD_DEFAULT_CONFIG();
-    cfg.stack_size=8192;
+    /* handle_save's locals alone (three 1040-byte escape buffers, a 3400-byte
+     * json buffer, a ~2.2KB nf_config) exceed 10KB - 8192 silently overflowed
+     * this task's stack on every POST /save regardless of body content. */
+    cfg.stack_size=24576;
     esp_err_t e=httpd_start(&s_server,&cfg);
     if (e!=ESP_OK) { ESP_LOGE(TAG,"Settings server failed to start: %s",esp_err_to_name(e)); s_server=NULL; return e; }
     httpd_uri_t root={.uri="/",.method=HTTP_GET,.handler=handle_root};
@@ -187,11 +220,15 @@ esp_err_t nf_webui_start(const nf_config *config, QueueHandle_t serial_messages)
     httpd_uri_t reload={.uri="/reload",.method=HTTP_POST,.handler=handle_reload};
     httpd_uri_t ota={.uri="/ota",.method=HTTP_POST,.handler=handle_ota};
     httpd_uri_t logs={.uri="/logs",.method=HTTP_GET,.handler=handle_logs};
+    httpd_uri_t pause={.uri="/pause",.method=HTTP_POST,.handler=handle_pause};
+    httpd_uri_t resume={.uri="/resume",.method=HTTP_POST,.handler=handle_resume};
     httpd_register_uri_handler(s_server,&root);
     httpd_register_uri_handler(s_server,&save);
     httpd_register_uri_handler(s_server,&reload);
     httpd_register_uri_handler(s_server,&ota);
     httpd_register_uri_handler(s_server,&logs);
+    httpd_register_uri_handler(s_server,&pause);
+    httpd_register_uri_handler(s_server,&resume);
     ESP_LOGI(TAG,"Always-on settings page at http://<device-ip>/ (see \"sta ip:\" above for the address)");
     return ESP_OK;
 }
