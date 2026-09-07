@@ -24,4 +24,8 @@ CONFIG_OTA_ALLOW_HTTP=y
 # Power management framework, needed for esp_pm_configure()/automatic light
 # sleep used by the "pause" state. Frequency is kept fixed (see light_sleep()
 # in main.c) - only the tickless-idle light-sleep behavior is used, not DFS.
+# PM_ENABLE does NOT auto-select TICKLESS_IDLE in this IDF version - without
+# it, esp_pm_configure(light_sleep_enable=true) returns ESP_ERR_NOT_SUPPORTED
+# (confirmed live on hardware).
 CONFIG_PM_ENABLE=y
+CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
