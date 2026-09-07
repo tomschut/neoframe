@@ -137,6 +137,26 @@ codes stripped) from boot, in addition to the normal serial console — nothing
 is redirected away from serial. View it at `/logs` on the always-on settings
 page (plain text). The buffer is not persisted across reboots.
 
+## Pause / resume
+
+`/pause` and `/resume` (POST, no body) on the always-on settings page, or the
+serial lines `pause`/`resume`, toggle a runtime-only state (not persisted;
+every boot starts active) intended for an external presence trigger (e.g.
+Home Assistant calling these over the LAN) rather than manual day-to-day use.
+Pausing: de-asserts `SW_C` (the e-paper analog boost supply — the same rail a
+failed render already de-asserts; harmless since e-ink holds its image with
+zero power either way), skips the image-poll loop entirely, and enables
+automatic light sleep (`esp_pm_configure`, CPU parked at a fixed 160MHz
+during idle — no dynamic frequency scaling, kept off deliberately since DFS
+combined with octal PSRAM at 80MHz has timing edge cases on some ESP32-S3
+configs that haven't been validated here) plus WiFi modem power-save
+(`WIFI_PS_MIN_MODEM`). **WiFi stays associated and the settings page stays
+reachable** — confirmed on hardware (98ms response while paused) — this is
+why light sleep was used instead of deep sleep, at the cost of much smaller
+power savings than deep sleep would give. Resuming reverses all of this and
+immediately triggers a fresh poll, so the panel updates right away rather
+than waiting out whatever was left of the interval.
+
 ## Image contract
 
 HTTP(S) 200 must contain exactly **960000 bytes**, with no image-file header:
@@ -191,8 +211,13 @@ image loop's control path.
 The current firmware uses awake FreeRTOS delays. Deep sleep, active-window
 enforcement, regular power-rail gating, LED control, battery ADC, and
 compatibility endpoints are deferred until P0 is proven on hardware, as
-required by the project. OTA (manual-trigger only, see above) has been
-implemented ahead of that gate at the user's explicit request. `active_start`,
+required by the project. OTA (manual-trigger only, see above) and pause/resume
+(automatic *light* sleep only, not deep sleep - see "Pause / resume" above)
+have been implemented ahead of that gate at the user's explicit request, and
+partially overlap it: pause/resume covers the power-rail-gating and
+light-sleep-with-WiFi part of what P1 deep sleep would eventually need, but
+true deep sleep (far greater power savings, WiFi disconnects) remains
+deferred. `active_start`,
 `active_end`, `power_profile` and
 `led_enabled` are validated, stored, and settable through the captive portal
 or serial/remote config, but have no runtime behavior yet (no active-window
