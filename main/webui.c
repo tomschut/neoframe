@@ -57,7 +57,8 @@ static esp_err_t send_page(httpd_req_t *req) {
         "<label>Active until</label><input name=stop type=time required value=\"%s\">"
         "<label>Timezone (POSIX rule)</label><input name=timezone maxlength=63 value=\"%s\">"
         "<label>Power profile</label><select name=power_profile>"
-        "<option value=low_power%s>low_power</option><option value=always_on%s>always_on</option></select>"
+        "<option value=low_power%s>low_power</option><option value=always_on%s>always_on</option>"
+        "<option value=ac_power%s>ac_power</option></select>"
         "<div class=checkline><input id=led name=led_enabled type=checkbox value=1%s>"
         "<label for=led style=margin:0>LED enabled</label></div>"
         "<h3>Firmware</h3><p>Running version: <code>%s</code></p>"
@@ -80,6 +81,7 @@ static esp_err_t send_page(httpd_req_t *req) {
         s_config->active_start, s_config->active_end, timezone,
         strcmp(s_config->power_profile,"low_power")?"":" selected",
         strcmp(s_config->power_profile,"always_on")?"":" selected",
+        strcmp(s_config->power_profile,"ac_power")?"":" selected",
         s_config->led_enabled?" checked":"",
         version, firmware_url,
         s_paused&&*s_paused?"Paused":"Active",

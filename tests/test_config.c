@@ -105,6 +105,9 @@ int main(void) {
     assert(nf_schedule_next(&out,epoch+3600)==6*86400+20*3600);
     assert(!nf_config_parse("{\"schedule\":[]}",&base,&out,false));
     assert(!nf_config_parse("{\"timezone\":\"Europe/NotReal\"}",&base,&out,false));
+    assert(nf_config_parse("{\"power_profile\":\"ac_power\"}",&base,&out,false));
+    assert(!strcmp(out.power_profile,"ac_power"));
+    assert(!nf_config_parse("{\"power_profile\":\"turbo\"}",&base,&out,false));
     assert(nf_config_parse("{\"schedule\":[{\"days\":\"daily\",\"start\":\"00:00\",\"stop\":\"00:00\",\"every\":\"5m\"}]}",&base,&out,false));
     setenv("TZ","CET-1CEST,M3.5.0,M10.5.0/3",1); tzset();
     struct tm spring={.tm_year=126,.tm_mon=2,.tm_mday=29,.tm_hour=1,.tm_min=59,.tm_isdst=-1};

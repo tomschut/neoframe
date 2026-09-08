@@ -6,6 +6,7 @@
 #include "logbuf.h"
 #include "ota.h"
 #include "lowpower.h"
+#include "schedule.h"
 #include "driver/gpio.h"
 #include "nvs_flash.h"
 #include "esp_wifi.h"
@@ -244,6 +245,15 @@ void app_main(void) {
                 failed_connects=0; backoff=1; connect_at=0;
             }
         }
+        bool ac_mode=!strcmp(c.power_profile,"ac_power");
+        if (ac_mode) { setenv("TZ",c.timezone,1); tzset(); }
+        bool ac_clock_ok=time(NULL)>=1700000000;
+        /* ac_power mirrors low_power's window+paused gate on rendering only,
+         * never on settings polling, and never sleeps or drops the portal -
+         * for a mains-powered frame that has no reason to save power but
+         * still wants the same schedule/paused behavior as battery mode. */
+        bool render_allowed=!ac_mode ||
+            (ac_clock_ok && nf_schedule_now(&c,time(NULL)) && !c.paused);
         if (!paused && now>=next_poll && now>=render_after && candidate && cached) {
             settings_result *r;
             while (xQueueReceive(settings_results,&r,0)==pdTRUE) {
@@ -258,7 +268,7 @@ void app_main(void) {
             }
             bool due=have_frame && now-last_refresh>=NF_DAY-60;
             bool render=false;
-            if (online() && *c.image_url) {
+            if (online() && *c.image_url && render_allowed) {
                 size_t n=0; int status=0; nf_validator received;
                 /* TLS certificate dates require SNTP; HTTP can run before sync. */
                 if (!strncmp(c.image_url,"https://",8) && time(NULL)<1700000000) e=ESP_ERR_INVALID_STATE;
@@ -277,14 +287,15 @@ void app_main(void) {
                     } else ESP_LOGE(TAG,"Panel failed: %s; validator retained",esp_err_to_name(e));
                 }
             }
-            if (due && !render && panel_ready) {
+            if (due && !render && panel_ready && render_allowed) {
                 e=nf_panel_render(cached); render_after=seconds()+NF_MIN_INTERVAL;
                 if (e==ESP_OK) last_refresh=seconds();
                 else ESP_LOGE(TAG,"Daily cached refresh failed: %s",esp_err_to_name(e));
             }
             settings_job job={.config=c,.generation=generation,.validator=config_validator};
             if (*c.config_url) xQueueOverwrite(settings_jobs,&job);
-            next_poll=seconds()+c.update_interval_s;
+            next_poll=seconds()+(ac_mode && ac_clock_ok ?
+                nf_schedule_next(&c,time(NULL)) : c.update_interval_s);
             if (have_frame && next_poll>last_refresh+NF_DAY-60) next_poll=last_refresh+NF_DAY-60;
             if (next_poll<render_after) next_poll=render_after;
         }

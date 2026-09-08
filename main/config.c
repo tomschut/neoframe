@@ -52,7 +52,8 @@ bool nf_config_valid(const nf_config *c) {
         nf_url_valid(c->image_url, true) && nf_url_valid(c->config_url, true) &&
         nf_url_valid(c->firmware_url, true) &&
         nf_time_valid(c->active_start) && nf_time_valid(c->active_end) && c->led_enabled <= 1 &&
-        (!strcmp(c->power_profile, "low_power") || !strcmp(c->power_profile, "always_on"));
+        (!strcmp(c->power_profile, "low_power") || !strcmp(c->power_profile, "always_on") ||
+            !strcmp(c->power_profile, "ac_power"));
 }
 bool nf_config_parse(const char *json, const nf_config *base, nf_config *out, bool remote) {
     if (!json || strstr(json,"\\u0000")) return false;

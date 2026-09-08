@@ -195,7 +195,8 @@ documented contract; missing required fields reject the entire update:
 Interval must be an integer from 180 to 86400 seconds. Times must be valid HH:MM.
 Duplicate keys, unknown fields, wrong types, overlong strings, malformed/partial JSON,
 HTTP errors and oversized JSON are ignored. WiFi credentials and `config_url` cannot
-be changed remotely. Optional `power_profile` accepts `low_power` or `always_on`.
+be changed remotely. Optional `power_profile` accepts `low_power`, `always_on`, or
+`ac_power` (see "Scheduled deep sleep" below).
 
 Settings fetches run in a separate lower-priority task after an image cycle, with
 a 4096-byte cap, a 2-second socket timeout and a 4-second body deadline. DNS/connect
@@ -304,6 +305,21 @@ are read at the next window opening. The device cannot receive requests during
 deep sleep; the last picture remains visible. Set `power_profile` to `always_on`
 in the remote response to regain persistent local web access on the next wake.
 Local POST /schedule accepts the same JSON and queues it for validation/storage.
+
+A third `power_profile`, `ac_power`, is for a frame that's permanently mains-powered
+and has no reason to sleep or save power, but should still follow the same
+`schedule`/`paused` behavior as a battery-powered (`low_power`) frame - for
+example only showing the photo during the day, or letting Home Assistant pause
+it, without ever losing settings-page/WiFi access to do so. It evaluates the
+same schedule/`paused` gate as `low_power` to decide whether to render, but
+never sleeps and never stops the settings page or WiFi: the device stays fully
+reachable at all times, and `config_url`/serial changes keep applying
+immediately, same as `always_on`. It's also useful for validating a `schedule`
+and `timezone` against the real clock and windows before committing to
+`low_power`, where a mistake is only visible/fixable at the next wake. In
+`ac_power`, polling cadence outside the render gate still follows the schedule
+(the per-window `every` interval, or time until the next window opens) rather
+than `update_interval_s`.
 
 The old daily active_start/active_end/update_interval_s contract is also accepted
 when no schedule has been configured. Existing v1 configs migrate with credentials
