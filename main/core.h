@@ -15,3 +15,7 @@ bool nf_pixels_valid(const uint8_t *data, size_t size);
 size_t nf_row_offset(unsigned controller, unsigned row);
 bool nf_url_valid(const char *url, bool optional);
 bool nf_time_valid(const char *time);
+
+/* Seconds until the next interval slot within the daily window. */
+uint32_t nf_schedule_delay(unsigned day_second, unsigned start, unsigned stop, uint32_t interval);
+bool nf_schedule_active(unsigned day_second, unsigned start, unsigned stop);

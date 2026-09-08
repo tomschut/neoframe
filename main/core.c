@@ -25,3 +25,16 @@ bool nf_time_valid(const char *t) {
         isdigit((unsigned char)t[1]) && isdigit((unsigned char)t[3]) && isdigit((unsigned char)t[4]) &&
         (t[0]-'0')*10 + t[1]-'0' < 24 && (t[3]-'0')*10 + t[4]-'0' < 60;
 }
+
+bool nf_schedule_active(unsigned t, unsigned start, unsigned stop) {
+    if (start==stop) return true;
+    return start<stop ? t>=start && t<stop : t>=start || t<stop;
+}
+uint32_t nf_schedule_delay(unsigned t, unsigned start, unsigned stop, uint32_t interval) {
+    if (!interval) return NF_MIN_INTERVAL;
+    unsigned elapsed=(t+NF_DAY-start)%NF_DAY;
+    unsigned length=start==stop ? NF_DAY : (stop+NF_DAY-start)%NF_DAY;
+    if (elapsed>=length) return (start+NF_DAY-t)%NF_DAY;
+    unsigned next=(elapsed/interval+1)*interval;
+    return next<length ? next-elapsed : NF_DAY-elapsed;
+}

@@ -10,3 +10,4 @@ documentation/
 .ccache/
 .gitconfig
 PROJECT-1-neoframe-firmware.md
+.vscode/

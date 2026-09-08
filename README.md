@@ -204,24 +204,26 @@ latency is bounded by the underlying IDF network stack and is not a strict total
 A one-slot result queue delivers settings for the next image cycle; results based
 on an older configuration generation are discarded. Invalid settings never alter
 the image schedule. Slow settings may share network bandwidth, but are not on the
-image loop's control path.
+image loop's control path. Like `image_url`, `config_url` fetches send a
+conditional GET (ETag preferred over Last-Modified) once a prior fetch has
+succeeded; the validator is adopted only after the response is applied and is
+reset whenever `config_url` itself changes.
 
 ## Deferred P1 features
 
-The current firmware uses awake FreeRTOS delays. Deep sleep, active-window
-enforcement, regular power-rail gating, LED control, battery ADC, and
-compatibility endpoints are deferred until P0 is proven on hardware, as
-required by the project. OTA (manual-trigger only, see above) and pause/resume
-(automatic *light* sleep only, not deep sleep - see "Pause / resume" above)
-have been implemented ahead of that gate at the user's explicit request, and
-partially overlap it: pause/resume covers the power-rail-gating and
-light-sleep-with-WiFi part of what P1 deep sleep would eventually need, but
-true deep sleep (far greater power savings, WiFi disconnects) remains
-deferred. `active_start`,
-`active_end`, `power_profile` and
-`led_enabled` are validated, stored, and settable through the captive portal
-or serial/remote config, but have no runtime behavior yet (no active-window
-enforcement, no power-rail gating in sleep, no low-power mode).
+LED control, battery ADC, and compatibility endpoints remain deferred until
+P0 is proven on hardware, as required by the project. `led_enabled` is
+validated, stored, and settable through the captive portal or serial/remote
+config, but has no runtime behavior yet.
+
+Everything else originally deferred here has since shipped ahead of that gate
+at the user's explicit request: OTA (manual-trigger only, see above),
+pause/resume (automatic *light* sleep, WiFi stays associated - see
+"Pause / resume" above), and now true timer-based deep sleep with
+active-window/cron-style schedule enforcement and panel power-rail gating
+across sleep, selected via `power_profile: low_power` (see
+"Scheduled deep sleep" below). `active_start`/`active_end` remain supported
+as the legacy single-window form when no `schedule` array is configured.
 
 The panel performs the GD POF command after refresh. BUSY waits have a 120-second
 limit; on a panel error, SW_C is deasserted to prevent leaving the boost supply on.
@@ -260,3 +262,54 @@ To serve your own already-packed image, use `--frame path/to/frame.bin`.
 Host sanitizer tests exercise the production C configuration parser, storage adapter,
 pixel/geometry helpers and HTTP adapter with simulated NVS/network failures. They do
 not emulate the radio, real NVS power loss, FreeRTOS scheduling or panel electronics.
+
+## Scheduled deep sleep
+
+Choose “Edit sleep schedule JSON” on the settings page to paste a schema.
+Set Settings URL on the main page to your server's JSON endpoint for automatic
+updates. The remote response can be:
+
+```json
+{
+  "timezone": "Europe/Amsterdam",
+  "power_profile": "low_power",
+  "paused": false,
+  "image_url": "http://192.168.2.26:8084/api/current_frame",
+  "schedule": [
+    {"days": "mon-fri", "start": "08:00", "stop": "22:00", "every": "5m"},
+    {"days": "sat-sun", "start": "10:00", "stop": "23:00", "every": "10m"}
+  ]
+}
+```
+
+Up to eight windows. Days accept `daily`, a lowercase weekday (`mon` … `sun`),
+or an inclusive range (`mon-fri`, `fri-mon`). Intervals accept whole minutes or
+hours (`5m`, `1h`), from 3 minutes to 24 hours. End times are exclusive.
+Overnight windows belong to their starting day; equal start/end means 24 hours.
+Overlapping windows combine their wake times. Europe/Amsterdam and UTC are
+supported named timezones; other zones require a POSIX TZ rule. DST is handled
+when finding weekly wake times. This is a window schedule, not cron syntax.
+
+In low_power the device wakes, connects, fetches settings first, commits valid
+changes to NVS, optionally renders, and deep sleeps. Outside every window it
+sleeps until the next opening. ETag is preferred over Last-Modified; validators
+survive timer deep sleep. Invalid responses retain saved settings. Unchanged
+settings do not write NVS. Image requests are unconditional after sleep because
+the PSRAM image cache is lost.
+
+Home Assistant changes `paused` on your **settings server**, preserving the rest
+of the schema and updating its ETag/Last-Modified. Paused devices skip rendering
+but still wake at scheduled check times to discover resume. Overnight changes
+are read at the next window opening. The device cannot receive requests during
+deep sleep; the last picture remains visible. Set `power_profile` to `always_on`
+in the remote response to regain persistent local web access on the next wake.
+Local POST /schedule accepts the same JSON and queues it for validation/storage.
+
+The old daily active_start/active_end/update_interval_s contract is also accepted
+when no schedule has been configured. Existing v1 configs migrate with credentials
+preserved and always_on selected, since low_power previously did not deep sleep.
+Cold boots retain the 180-second guard; timer wakes use retained last-render time.
+Network/time acquisition is bounded; without a valid clock, rendering is skipped
+and retried after update_interval_s (600 seconds by default). The panel rail is
+held off during sleep. Actual power consumption and wake reliability still need
+hardware verification. Host tests cover parser and schedule behavior.

@@ -1,5 +1,6 @@
 #include "webui.h"
 #include "formutil.h"
+#include "cJSON.h"
 #include "logbuf.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -23,7 +24,8 @@ static esp_err_t enqueue(const char *line) {
 }
 
 static esp_err_t send_page(httpd_req_t *req) {
-    char image_url[1024], config_url[1024], firmware_url[1024];
+    char image_url[1024], config_url[1024], firmware_url[1024], timezone[384];
+    nf_html_escape(s_config->timezone,timezone,sizeof(timezone));
     nf_html_escape(s_config->image_url,image_url,sizeof(image_url));
     nf_html_escape(s_config->config_url,config_url,sizeof(config_url));
     nf_html_escape(s_config->firmware_url,firmware_url,sizeof(firmware_url));
@@ -45,7 +47,7 @@ static esp_err_t send_page(httpd_req_t *req) {
         "form{margin-top:24px}h3{margin-top:32px;border-top:1px solid #ddd;padding-top:16px}"
         ".checkline{display:flex;align-items:center;gap:8px;margin-top:12px}"
         ".checkline input{width:auto}</style>"
-        "<h2>NeoFrame settings</h2>"
+        "<h2>NeoFrame settings</h2><p><a href=/schedule>Edit sleep schedule JSON</a></p>"
         "%s%s%s"
         "<form method=post action=/save>"
         "<label>Image URL</label><input name=image_url type=url maxlength=500 required value=\"%s\">"
@@ -53,6 +55,7 @@ static esp_err_t send_page(httpd_req_t *req) {
         "<label>Refresh every (minutes)</label><input name=interval type=number min=3 max=1440 required value=\"%d\">"
         "<label>Active from</label><input name=start type=time required value=\"%s\">"
         "<label>Active until</label><input name=stop type=time required value=\"%s\">"
+        "<label>Timezone (POSIX rule)</label><input name=timezone maxlength=63 value=\"%s\">"
         "<label>Power profile</label><select name=power_profile>"
         "<option value=low_power%s>low_power</option><option value=always_on%s>always_on</option></select>"
         "<div class=checkline><input id=led name=led_enabled type=checkbox value=1%s>"
@@ -74,7 +77,7 @@ static esp_err_t send_page(httpd_req_t *req) {
         "<h3>Logs</h3><p><a href=/logs>View recent log output</a></p>",
         *s_error?"<div class=err>":"", s_error, *s_error?"</div>":"",
         image_url, config_url, (int)(s_config->update_interval_s/60),
-        s_config->active_start, s_config->active_end,
+        s_config->active_start, s_config->active_end, timezone,
         strcmp(s_config->power_profile,"low_power")?"":" selected",
         strcmp(s_config->power_profile,"always_on")?"":" selected",
         s_config->led_enabled?" checked":"",
@@ -82,10 +85,43 @@ static esp_err_t send_page(httpd_req_t *req) {
         s_paused&&*s_paused?"Paused":"Active",
         s_paused&&*s_paused?"resume":"pause",
         s_paused&&*s_paused?"Resume":"Pause");
+    if (n<0 || n>=6144) { free(html); return httpd_resp_send_500(req); }
     httpd_resp_set_type(req,"text/html");
     httpd_resp_send(req,html,n);
     free(html);
     return ESP_OK;
+}
+
+static esp_err_t handle_schedule(httpd_req_t *req) {
+    if (req->method==HTTP_POST) {
+        if (!req->content_len || req->content_len>4096) return httpd_resp_send_err(req,HTTPD_400_BAD_REQUEST,"JSON must be 1-4096 bytes");
+        char *body=calloc(1,req->content_len+1);
+        nf_config *candidate=malloc(sizeof(*candidate));
+        if (!body || !candidate) { free(body); free(candidate); return httpd_resp_send_500(req); }
+        size_t used=0;
+        while (used<req->content_len) {
+            int n=httpd_req_recv(req,body+used,req->content_len-used);
+            if (n<=0) { free(body); free(candidate); return httpd_resp_send_err(req,HTTPD_400_BAD_REQUEST,"Read failed"); }
+            used+=n;
+        }
+        bool valid=!memchr(body,0,used) && nf_config_parse(body,s_config,candidate,false);
+        esp_err_t e=valid?enqueue(body):ESP_ERR_INVALID_ARG;
+        free(candidate); free(body);
+        if (e!=ESP_OK) return httpd_resp_send_err(req,HTTPD_400_BAD_REQUEST,"Invalid settings or queue busy");
+        httpd_resp_set_type(req,"text/plain");
+        return httpd_resp_sendstr(req,"Settings queued. Low-power mode makes this page unavailable while asleep.");
+    }
+    httpd_resp_set_type(req,"text/html");
+    return httpd_resp_sendstr(req,
+        "<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'><title>Schedule</title>"
+        "<h2>Remote settings and sleep schedule</h2><p>Paste the JSON settings schema below. "
+        "Use the Settings URL on the main page for automatic remote updates. "
+        "Low-power mode sleeps between checks; the local page will be unavailable.</p>"
+        "<textarea id=j rows=22 style='width:95%;max-width:800px' placeholder='Paste settings JSON here'></textarea>"
+        "<p><button id=b>Apply settings</button> <a href=/>Back</a></p><pre id=result></pre>"
+        "<script>b.onclick=async()=>{try{JSON.parse(j.value);const r=await fetch('/schedule',"
+        "{method:'POST',headers:{'Content-Type':'application/json'},body:j.value});"
+        "result.textContent=await r.text()}catch(e){result.textContent=String(e)}};</script>");
 }
 
 static esp_err_t handle_root(httpd_req_t *req) { return send_page(req); }
@@ -113,6 +149,8 @@ static esp_err_t handle_save(httpd_req_t *req) {
     nf_form_field(body,"stop",stop,sizeof(stop));
     nf_form_field(body,"power_profile",power_profile,sizeof(power_profile));
     nf_form_field(body,"led_enabled",led,sizeof(led));
+    char submitted_timezone[64]={0};
+    nf_form_field(body,"timezone",submitted_timezone,sizeof(submitted_timezone));
     free(body);
 
     /* Every value is attacker-influenced (a raw POST can send anything
@@ -127,11 +165,16 @@ static esp_err_t handle_save(httpd_req_t *req) {
     nf_json_escape(power_profile,power_profile_e,sizeof(power_profile_e));
 
     long minutes=strtol(interval,NULL,10);
-    char json[3400];
+    char timezone_value[64], timezone_e[384];
+    /* Missing field from an older browser form preserves the current timezone. */
+    strcpy(timezone_value,s_config->timezone);
+    if (*submitted_timezone) strcpy(timezone_value,submitted_timezone);
+    nf_json_escape(timezone_value,timezone_e,sizeof(timezone_e));
+    char json[3900];
     int n=snprintf(json,sizeof(json),
-        "{\"image_url\":\"%s\",\"config_url\":\"%s\",\"firmware_url\":\"%s\",\"update_interval_s\":%ld,"
+        "{\"timezone\":\"%s\",\"image_url\":\"%s\",\"config_url\":\"%s\",\"firmware_url\":\"%s\",\"update_interval_s\":%ld,"
         "\"active_start\":\"%s\",\"active_end\":\"%s\",\"power_profile\":\"%s\",\"led_enabled\":%s}",
-        image_url_e,config_url_e,firmware_url_e,minutes>0?minutes*60:0,start_e,stop_e,power_profile_e,*led?"true":"false");
+        timezone_e,image_url_e,config_url_e,firmware_url_e,minutes>0?minutes*60:0,start_e,stop_e,power_profile_e,*led?"true":"false");
     if (n<0 || n>=(int)sizeof(json)) {
         snprintf(s_error,sizeof(s_error),"Submitted values too long.");
         return send_page(req);
@@ -213,6 +256,7 @@ esp_err_t nf_webui_start(const nf_config *config, QueueHandle_t serial_messages,
      * json buffer, a ~2.2KB nf_config) exceed 10KB - 8192 silently overflowed
      * this task's stack on every POST /save regardless of body content. */
     cfg.stack_size=24576;
+    cfg.max_uri_handlers=12;
     esp_err_t e=httpd_start(&s_server,&cfg);
     if (e!=ESP_OK) { ESP_LOGE(TAG,"Settings server failed to start: %s",esp_err_to_name(e)); s_server=NULL; return e; }
     httpd_uri_t root={.uri="/",.method=HTTP_GET,.handler=handle_root};
@@ -222,6 +266,10 @@ esp_err_t nf_webui_start(const nf_config *config, QueueHandle_t serial_messages,
     httpd_uri_t logs={.uri="/logs",.method=HTTP_GET,.handler=handle_logs};
     httpd_uri_t pause={.uri="/pause",.method=HTTP_POST,.handler=handle_pause};
     httpd_uri_t resume={.uri="/resume",.method=HTTP_POST,.handler=handle_resume};
+    httpd_uri_t schedule_get={.uri="/schedule",.method=HTTP_GET,.handler=handle_schedule};
+    httpd_uri_t schedule_post={.uri="/schedule",.method=HTTP_POST,.handler=handle_schedule};
+    httpd_register_uri_handler(s_server,&schedule_get);
+    httpd_register_uri_handler(s_server,&schedule_post);
     httpd_register_uri_handler(s_server,&root);
     httpd_register_uri_handler(s_server,&save);
     httpd_register_uri_handler(s_server,&reload);

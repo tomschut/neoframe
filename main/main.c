@@ -5,6 +5,8 @@
 #include "webui.h"
 #include "logbuf.h"
 #include "ota.h"
+#include "lowpower.h"
+#include "driver/gpio.h"
 #include "nvs_flash.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
@@ -27,8 +29,8 @@
 static const char *TAG="neoframe";
 static EventGroupHandle_t wifi_events;
 static QueueHandle_t serial_messages, settings_jobs, settings_results;
-typedef struct { nf_config config; uint32_t generation; } settings_job;
-typedef struct { uint32_t generation; char json[4097]; } settings_result;
+typedef struct { nf_config config; uint32_t generation; nf_validator validator; } settings_job;
+typedef struct { uint32_t generation; char json[4097]; nf_validator validator; } settings_result;
 static int64_t seconds(void) { return esp_timer_get_time()/1000000; }
 static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data) {
     (void)arg; (void)data;
@@ -84,15 +86,17 @@ static void settings_task(void *arg) {
     for (;;) {
         xQueueReceive(settings_jobs,&job,portMAX_DELAY);
         if (!*job.config.config_url || !online()) continue;
+        size_t n; int status; nf_validator received;
+        char json[4096];
+        esp_err_t e=nf_fetch(job.config.config_url,&job.validator,(uint8_t *)json,sizeof(json),&n,&status,&received,4000);
+        if (e==ESP_OK && status==304) { ESP_LOGI(TAG,"Settings unchanged"); continue; }
+        if (e!=ESP_OK || status!=200 || memchr(json,0,n)) {
+            ESP_LOGW(TAG,"Settings fetch ignored: %s, HTTP %d",esp_err_to_name(e),status); continue;
+        }
         settings_result *r=calloc(1,sizeof(*r));
         if (!r) { ESP_LOGW(TAG,"Settings allocation failed; ignored"); continue; }
-        r->generation=job.generation;
-        nf_validator v; size_t n; int status;
-        esp_err_t e=nf_fetch(job.config.config_url,NULL,(uint8_t *)r->json,4096,&n,&status,&v,4000);
-        if (e!=ESP_OK || status!=200 || memchr(r->json,0,n)) {
-            ESP_LOGW(TAG,"Settings fetch ignored: %s, HTTP %d",esp_err_to_name(e),status); free(r); continue;
-        }
-        r->json[n]=0;
+        r->generation=job.generation; r->validator=received;
+        memcpy(r->json,json,n); r->json[n]=0;
         if (xQueueSend(settings_results,&r,0)!=pdTRUE) free(r);
     }
 }
@@ -129,6 +133,8 @@ static bool provision(nf_config *c, QueueHandle_t serial_messages) {
     return true;
 }
 void app_main(void) {
+    gpio_deep_sleep_hold_dis();
+    gpio_hold_dis(GPIO_NUM_45);
     nf_logbuf_init();
     ESP_LOGI(TAG,"Wake reason %d",esp_sleep_get_wakeup_cause());
     /* Never erase NVS as an automatic recovery strategy: credentials matter. */
@@ -165,7 +171,11 @@ void app_main(void) {
      * seconds. Only (re)apply credentials if we're not already online. */
     if (!online()) credentials(&c);
     sntp_setoperatingmode(SNTP_OPMODE_POLL); sntp_setservername(0,"pool.ntp.org"); sntp_init();
-    if (xTaskCreate(settings_task,"settings",8192,NULL,1,NULL)!=pdPASS)
+    if (!strcmp(c.power_profile,"low_power")) nf_lowpower_cycle(&c);
+    /* settings_job (~2.6KB) plus its own json[4096] local leaves too little
+     * margin on 8192 given how this project has already been bitten twice by
+     * exactly this kind of tight stack budget - generous headroom instead. */
+    if (xTaskCreate(settings_task,"settings",16384,NULL,1,NULL)!=pdPASS)
         ESP_LOGW(TAG,"Settings task unavailable; image loop continues");
     /* Always-on settings page: safe to start unconditionally here, since any
      * captive-portal HTTP server above has already been stopped by now. */
@@ -177,6 +187,7 @@ void app_main(void) {
     if (!candidate || !cached) ESP_LOGE(TAG,"PSRAM frame allocation failed; serial configuration remains available");
     bool panel_ready=false, have_frame=false, ota_confirmed=false;
     nf_validator validator={0}; char validator_url[512]={0};
+    nf_validator config_validator={0}; char config_validator_url[512]={0};
     uint32_t generation=0, backoff=1, failed_connects=0;
     int64_t connect_at=0, next_poll=0, last_refresh=0;
     /* A full boot cooldown also protects against rapid power cycling. */
@@ -210,6 +221,11 @@ void app_main(void) {
             } else if (apply(&c,line,false,&generation)) { next_poll=0; connect_at=0; backoff=1; }
             free(line);
         }
+        if (!strcmp(c.power_profile,"low_power")) {
+            nf_webui_stop();
+            nf_lowpower_cycle(&c);
+            nf_webui_start(&c,serial_messages,&paused);
+        }
         int64_t now=seconds();
         if (online()) {
             backoff=1; failed_connects=0;
@@ -231,11 +247,14 @@ void app_main(void) {
         if (!paused && now>=next_poll && now>=render_after && candidate && cached) {
             settings_result *r;
             while (xQueueReceive(settings_results,&r,0)==pdTRUE) {
-                if (r->generation==generation) apply(&c,r->json,true,&generation);
+                if (r->generation==generation && apply(&c,r->json,true,&generation)) config_validator=r->validator;
                 free(r);
             }
             if (strcmp(validator_url,c.image_url)) {
                 memset(&validator,0,sizeof(validator)); strcpy(validator_url,c.image_url);
+            }
+            if (strcmp(config_validator_url,c.config_url)) {
+                memset(&config_validator,0,sizeof(config_validator)); strcpy(config_validator_url,c.config_url);
             }
             bool due=have_frame && now-last_refresh>=NF_DAY-60;
             bool render=false;
@@ -263,7 +282,7 @@ void app_main(void) {
                 if (e==ESP_OK) last_refresh=seconds();
                 else ESP_LOGE(TAG,"Daily cached refresh failed: %s",esp_err_to_name(e));
             }
-            settings_job job={.config=c,.generation=generation};
+            settings_job job={.config=c,.generation=generation,.validator=config_validator};
             if (*c.config_url) xQueueOverwrite(settings_jobs,&job);
             next_poll=seconds()+c.update_interval_s;
             if (have_frame && next_poll>last_refresh+NF_DAY-60) next_poll=last_refresh+NF_DAY-60;

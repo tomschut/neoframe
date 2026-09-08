@@ -105,7 +105,6 @@ static esp_err_t handle_submit(httpd_req_t *req) {
     free(body);
 
     nf_config candidate=s_base;
-    candidate.version=1;
     strncpy(candidate.wifi_ssid,ssid,sizeof(candidate.wifi_ssid)-1);
     strncpy(candidate.wifi_pass,pass,sizeof(candidate.wifi_pass)-1);
     strncpy(candidate.image_url,image_url,sizeof(candidate.image_url)-1);

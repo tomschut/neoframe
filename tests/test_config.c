@@ -1,4 +1,6 @@
+#define _POSIX_C_SOURCE 200809L
 #include "config.h"
+#include "schedule.h"
 #include "nvs.h"
 #include <assert.h>
 #include <stdio.h>
@@ -6,13 +8,14 @@
 #include <stdlib.h>
 static nf_config stored, pending;
 static int exists, fail_commit;
+static size_t stored_size=sizeof(nf_config);
 esp_err_t nvs_open(const char *ns,int mode,nvs_handle_t *h) {
     assert(!strcmp(ns,"neoframe")); (void)mode; *h=1; return ESP_OK;
 }
 esp_err_t nvs_get_blob(nvs_handle_t h,const char *key,void *out,size_t *n) {
     (void)h; assert(!strcmp(key,"config"));
     if (!exists) return ESP_FAIL;
-    assert(*n>=sizeof(stored)); memcpy(out,&stored,sizeof(stored)); *n=sizeof(stored); return ESP_OK;
+    assert(*n>=stored_size); memcpy(out,&stored,stored_size); *n=stored_size; return ESP_OK;
 }
 esp_err_t nvs_set_blob(nvs_handle_t h,const char *key,const void *in,size_t n) {
     (void)h; assert(!strcmp(key,"config") && n==sizeof(pending)); memcpy(&pending,in,n); return ESP_OK;
@@ -58,7 +61,7 @@ int main(void) {
     fail_commit=1; out=base; strcpy(out.wifi_ssid,"replacement");
     assert(nf_config_save(&out)!=ESP_OK);
     assert(nf_config_load(&reloaded)==ESP_OK && !strcmp(reloaded.wifi_ssid,"My WiFi"));
-    stored.version=9; assert(nf_config_load(&reloaded)!=ESP_OK && reloaded.version==1);
+    stored.version=9; assert(nf_config_load(&reloaded)!=ESP_OK && reloaded.version==2);
     stored=base; memset(stored.wifi_ssid,'x',sizeof(stored.wifi_ssid));
     assert(nf_config_load(&reloaded)!=ESP_OK);
     assert(!nf_url_valid("http:///",false)); assert(!nf_url_valid("http://user@host/",false));
@@ -72,5 +75,50 @@ int main(void) {
         assert(nf_row_offset(0,y)==y*600); assert(nf_row_offset(1,y)==y*600+300);
     }
     assert(nf_row_offset(2,0)==SIZE_MAX); free(frame);
+    assert(nf_config_parse("{\"paused\":true,\"timezone\":\"UTC0\"}",&base,&out,false));
+    assert(out.paused && !strcmp(out.timezone,"UTC0"));
+    assert(!nf_config_parse("{\"paused\":1}",&base,&out,false));
+    assert(nf_schedule_active(8*3600,8*3600,22*3600));
+    assert(!nf_schedule_active(22*3600,8*3600,22*3600));
+    assert(nf_schedule_active(3600,22*3600,8*3600));
+    assert(nf_schedule_delay(8*3600,8*3600,22*3600,300)==300);
+    assert(nf_schedule_delay(7*3600,8*3600,22*3600,300)==3600);
+    assert(nf_schedule_delay(22*3600-1,8*3600,22*3600,300)==10*3600+1);
+    assert(nf_config_parse("{\"schedule\":[{\"days\":\"mon-fri\",\"start\":\"08:00\",\"stop\":\"22:00\",\"every\":\"5m\"}]}",&base,&out,false));
+    setenv("TZ","UTC0",1); tzset();
+    struct tm monday={.tm_year=126,.tm_mon=8,.tm_mday=7,.tm_hour=8};
+    time_t epoch=mktime(&monday);
+    assert(nf_schedule_now(&out,epoch));
+    assert(nf_schedule_next(&out,epoch)==300);
+    assert(!nf_schedule_now(&out,epoch-3600));
+    assert(nf_schedule_next(&out,epoch-3600)==3600);
+    assert(!nf_config_parse("{\"schedule\":[{\"days\":\"invalid\",\"start\":\"08:00\",\"stop\":\"22:00\",\"every\":\"5m\"}]}",&base,&out,false));
+    const char *schema="{\"timezone\":\"Europe/Amsterdam\",\"power_profile\":\"low_power\","
+        "\"paused\":true,\"image_url\":\"http://host/frame\",\"schedule\":["
+        "{\"days\":\"fri\",\"start\":\"22:00\",\"stop\":\"02:00\",\"every\":\"5m\"}]}";
+    assert(nf_config_parse(schema,&base,&out,true) && out.paused);
+    assert(!strcmp(out.timezone,"CET-1CEST,M3.5.0,M10.5.0/3"));
+    struct tm saturday={.tm_year=126,.tm_mon=8,.tm_mday=12,.tm_hour=1};
+    epoch=mktime(&saturday);
+    assert(nf_schedule_now(&out,epoch));
+    assert(!nf_schedule_now(&out,epoch+3600));
+    assert(nf_schedule_next(&out,epoch+3600)==6*86400+20*3600);
+    assert(!nf_config_parse("{\"schedule\":[]}",&base,&out,false));
+    assert(!nf_config_parse("{\"timezone\":\"Europe/NotReal\"}",&base,&out,false));
+    assert(nf_config_parse("{\"schedule\":[{\"days\":\"daily\",\"start\":\"00:00\",\"stop\":\"00:00\",\"every\":\"5m\"}]}",&base,&out,false));
+    setenv("TZ","CET-1CEST,M3.5.0,M10.5.0/3",1); tzset();
+    struct tm spring={.tm_year=126,.tm_mon=2,.tm_mday=29,.tm_hour=1,.tm_min=59,.tm_isdst=-1};
+    epoch=mktime(&spring);
+    assert(nf_schedule_next(&out,epoch)==60);
+    struct tm autumn={.tm_year=126,.tm_mon=9,.tm_mday=25,.tm_hour=2,.tm_min=59,.tm_isdst=1};
+    epoch=mktime(&autumn);
+    assert(nf_schedule_next(&out,epoch)==60);
+    /* Real v1 prefix length, including its padding, migrates without erasure. */
+    stored=base; stored.version=1; strcpy(stored.power_profile,"low_power");
+    stored_size=(offsetof(nf_config,timezone)+3)&~(size_t)3;
+    assert(nf_config_load(&reloaded)==ESP_OK);
+    assert(!strcmp(reloaded.wifi_ssid,base.wifi_ssid));
+    assert(!strcmp(reloaded.power_profile,"always_on") && !reloaded.paused);
+    stored_size=sizeof(nf_config);
     puts("PASS: configuration validation, atomic rejection, NVS roundtrip/failure, pixels, dual-CS geometry");
 }

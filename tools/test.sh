@@ -4,7 +4,7 @@ set -eu
 mkdir -p build/host-tests
 cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -g \
     -Itests/stubs -Imain -I"$IDF_PATH/components/json/cJSON" \
-    tests/test_config.c main/config.c main/core.c "$IDF_PATH/components/json/cJSON/cJSON.c" \
+    tests/test_config.c main/config.c main/core.c main/schedule.c "$IDF_PATH/components/json/cJSON/cJSON.c" \
     -lm -o build/host-tests/config
 build/host-tests/config
 cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -g \
