@@ -2,8 +2,10 @@
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
 #include "esp_timer.h"
+#include "esp_log.h"
 #include <string.h>
 #include <strings.h>
+static const char *TAG="nf_http";
 typedef struct { nf_validator *v; bool encoded; } headers;
 static esp_err_t event(esp_http_client_event_t *e) {
     headers *h=e->user_data;
@@ -40,7 +42,9 @@ esp_err_t nf_fetch(const char *url, const nf_validator *conditional,
     *status=esp_http_client_get_status_code(client);
     if (*status==304 && conditional && (*conditional->etag || *conditional->modified)) goto done;
     if (*status!=200 || h.encoded || announced>(int64_t)capacity) { result=ESP_ERR_INVALID_RESPONSE; goto done; }
-    while (!esp_http_client_is_complete_data_received(client)) {
+    /* Completion tracks network receipt, not consumption of the cached body.
+     * Drain read() even when fetch_headers() received the entire response. */
+    for (;;) {
         if (esp_timer_get_time()>=deadline) { result=ESP_ERR_TIMEOUT; goto done; }
         uint8_t extra;
         size_t available=capacity-*length;
@@ -48,13 +52,25 @@ esp_err_t nf_fetch(const char *url, const nf_validator *conditional,
             available ? (available>4096 ? 4096 : available) : 1);
         if (n<0) { result=ESP_FAIL; goto done; }
         if (n==0) {
-            if (!esp_http_client_is_complete_data_received(client)) result=ESP_ERR_INVALID_SIZE;
+            if (!esp_http_client_is_complete_data_received(client)) {
+                ESP_LOGW(TAG,"Response ended early: Content-Length=%lld, received=%u",
+                    (long long)announced,(unsigned)*length);
+                result=ESP_ERR_INVALID_SIZE;
+            }
             break;
         }
-        if (!available) { result=ESP_ERR_INVALID_SIZE; goto done; }
+        if (!available) {
+            ESP_LOGW(TAG,"Response exceeds buffer: Content-Length=%lld, capacity=%u",
+                (long long)announced,(unsigned)capacity);
+            result=ESP_ERR_INVALID_SIZE; goto done;
+        }
         *length+=(size_t)n;
     }
-    if (announced>0 && (size_t)announced!=*length) result=ESP_ERR_INVALID_SIZE;
+    if (announced>0 && (size_t)announced!=*length) {
+        ESP_LOGW(TAG,"Response length mismatch: Content-Length=%lld, received=%u",
+            (long long)announced,(unsigned)*length);
+        result=ESP_ERR_INVALID_SIZE;
+    }
 done:
     esp_http_client_close(client); esp_http_client_cleanup(client);
     return result;

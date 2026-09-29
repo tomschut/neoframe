@@ -6,6 +6,7 @@
 static esp_http_client_config_t config;
 static int response, body_size, announced, pos, read_error, opened, closed, cleaned, encoded;
 static int64_t now, read_delay;
+static bool prefetched;
 static char sent_key[64], sent_value[256];
 esp_err_t esp_crt_bundle_attach(void *p) { (void)p; return ESP_OK; }
 int64_t esp_timer_get_time(void) { return now; }
@@ -26,7 +27,7 @@ int64_t esp_http_client_fetch_headers(esp_http_client_handle_t h) {
 }
 int esp_http_client_get_status_code(esp_http_client_handle_t h) { (void)h;return response; }
 bool esp_http_client_is_complete_data_received(esp_http_client_handle_t h) {
-    (void)h; return pos==body_size && (announced==0 || pos==announced);
+    (void)h; return (prefetched || pos==body_size) && (announced==0 || body_size==announced);
 }
 int esp_http_client_read(esp_http_client_handle_t h,char *out,int n) {
     (void)h; now+=read_delay;
@@ -39,6 +40,7 @@ esp_err_t esp_http_client_close(esp_http_client_handle_t h) { (void)h;closed++;r
 esp_err_t esp_http_client_cleanup(esp_http_client_handle_t h) { (void)h;cleaned++;return ESP_OK; }
 static void reset(int status,int actual,int content_length) {
     response=status; body_size=actual; announced=content_length; pos=0;
+    prefetched=false;
     read_error=0; opened=0; closed=0; cleaned=0; encoded=0; now=0; read_delay=0;
     *sent_key=0; *sent_value=0;
 }
@@ -50,6 +52,9 @@ static esp_err_t fetch(const nf_validator *v,size_t *n) {
 int main(void) {
     size_t n; nf_validator v={.etag="\"old\"",.modified="yesterday"};
     reset(200,32,32); assert(fetch(NULL,&n)==ESP_OK && n==32);
+    reset(200,32,32); prefetched=true; assert(fetch(NULL,&n)==ESP_OK && n==32);
+    reset(200,32,0); prefetched=true; assert(fetch(NULL,&n)==ESP_OK && n==32);
+    reset(200,33,0); prefetched=true; assert(fetch(NULL,&n)==ESP_ERR_INVALID_SIZE);
     reset(200,32,0); assert(fetch(NULL,&n)==ESP_OK && n==32); /* chunked */
     reset(200,33,0); assert(fetch(NULL,&n)!=ESP_OK); /* oversized chunked */
     reset(200,33,33); assert(fetch(NULL,&n)!=ESP_OK && pos==0);
