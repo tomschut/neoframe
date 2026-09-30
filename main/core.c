@@ -26,6 +26,10 @@ bool nf_time_valid(const char *t) {
         (t[0]-'0')*10 + t[1]-'0' < 24 && (t[3]-'0')*10 + t[4]-'0' < 60;
 }
 
+bool nf_boot_settings_pending(bool timer_wake, int64_t ready_since, int64_t now) {
+    return !timer_wake && (ready_since<0 || now-ready_since<NF_BOOT_SETTINGS_SECONDS);
+}
+
 bool nf_schedule_active(unsigned t, unsigned start, unsigned stop) {
     if (start==stop) return true;
     return start<stop ? t>=start && t<stop : t>=start || t<stop;

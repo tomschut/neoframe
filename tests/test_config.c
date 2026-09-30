@@ -45,13 +45,20 @@ int main(void) {
         if (i>4) assert(!nf_config_parse(bad[i],&base,&out,false));
     }
     assert(nf_config_parse("{\"wifi_ssid\":\"My WiFi\",\"wifi_pass\":\"abcdefgh\",\"config_url\":\"http://host/settings\"}",&out,&base,false));
-    /* firmware_url: http or https like other URLs, never remote-settable
-     * even alongside an otherwise-complete valid remote payload; fine over
-     * serial or the local settings page (both parse with remote=false). */
+    /* Remote OTA requires URL and target version together; local manual OTA needs only a URL. */
     const char *remote_with_firmware="{\"update_interval_s\":600,\"image_url\":\"http://host/frame\","
         "\"active_start\":\"08:00\",\"active_end\":\"00:00\",\"led_enabled\":true,"
         "\"firmware_url\":\"https://host/fw.bin\"}";
     assert(!nf_config_parse(remote_with_firmware,&base,&out,true));
+    const char *remote_ota="{\"update_interval_s\":600,\"image_url\":\"http://host/frame\",\"active_start\":\"08:00\",\"active_end\":\"22:00\",\"led_enabled\":false,\"firmware_version\":\"test-v2\",\"firmware_url\":\"http://host/fw.bin\"}";
+    assert(nf_config_parse(remote_ota,&base,&out,true));
+    assert(!strcmp(out.firmware_version,"test-v2"));
+    assert(nf_config_parse(good,&out,&reloaded,true) && !*reloaded.firmware_version);
+    assert(!nf_config_parse("{\"firmware_version\":\"test\"}",&base,&out,false));
+    stored=out; stored.version=2; stored_size=offsetof(nf_config,firmware_version); exists=1;
+    assert(nf_config_load(&reloaded)==ESP_OK && reloaded.version==3 && !*reloaded.firmware_version);
+    stored_size=sizeof(stored);
+
     assert(nf_config_parse("{\"firmware_url\":\"https://host/fw.bin\"}",&base,&out,false));
     assert(!strcmp(out.firmware_url,"https://host/fw.bin"));
     assert(nf_config_parse("{\"firmware_url\":\"http://host/fw.bin\"}",&base,&out,false));
@@ -61,7 +68,18 @@ int main(void) {
     fail_commit=1; out=base; strcpy(out.wifi_ssid,"replacement");
     assert(nf_config_save(&out)!=ESP_OK);
     assert(nf_config_load(&reloaded)==ESP_OK && !strcmp(reloaded.wifi_ssid,"My WiFi"));
-    stored.version=9; assert(nf_config_load(&reloaded)!=ESP_OK && reloaded.version==2);
+    out=base;
+    assert(nf_config_reset_wifi(&out)!=ESP_OK);
+    assert(!memcmp(&out,&base,sizeof(out)));
+    assert(nf_config_load(&reloaded)==ESP_OK && !memcmp(&reloaded,&base,sizeof(base)));
+    fail_commit=0;
+    assert(nf_config_reset_wifi(&out)==ESP_OK);
+    nf_config reset_expected=base;
+    memset(reset_expected.wifi_ssid,0,sizeof(reset_expected.wifi_ssid));
+    memset(reset_expected.wifi_pass,0,sizeof(reset_expected.wifi_pass));
+    assert(!memcmp(&out,&reset_expected,sizeof(out)));
+    assert(nf_config_load(&reloaded)==ESP_OK && !memcmp(&reloaded,&reset_expected,sizeof(reloaded)));
+    stored.version=9; assert(nf_config_load(&reloaded)!=ESP_OK && reloaded.version==3);
     stored=base; memset(stored.wifi_ssid,'x',sizeof(stored.wifi_ssid));
     assert(nf_config_load(&reloaded)!=ESP_OK);
     assert(!nf_url_valid("http:///",false)); assert(!nf_url_valid("http://user@host/",false));
@@ -123,5 +141,14 @@ int main(void) {
     assert(!strcmp(reloaded.wifi_ssid,base.wifi_ssid));
     assert(!strcmp(reloaded.power_profile,"always_on") && !reloaded.paused);
     stored_size=sizeof(nf_config);
-    puts("PASS: configuration validation, atomic rejection, NVS roundtrip/failure, pixels, dual-CS geometry");
+    /* Cold boot and software reset wait for connectivity, then allow five
+     * full minutes of settings access. Timer wakes never get this delay. */
+    assert(nf_boot_settings_pending(false,-1,1000));
+    assert(nf_boot_settings_pending(false,1000,1000));
+    assert(nf_boot_settings_pending(false,1000,1299));
+    assert(!nf_boot_settings_pending(false,1000,1300));
+    assert(!nf_boot_settings_pending(false,1000,1301));
+    assert(!nf_boot_settings_pending(true,-1,0));
+    assert(!nf_boot_settings_pending(true,1000,1001));
+    puts("PASS: configuration, NVS/reset failure, pixels, scheduling and boot settings window");
 }

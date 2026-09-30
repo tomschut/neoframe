@@ -55,6 +55,7 @@ void nf_lowpower_cycle(nf_config *c) {
             free(body); free(next);
         }
     }
+    if (connected) nf_ota_apply_requested(c->firmware_url,c->firmware_version);
     setenv("TZ",c->timezone,1); tzset();
     if (strcmp(c->power_profile,"low_power")) return;
     time_t now=time(NULL);

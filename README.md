@@ -52,8 +52,8 @@ credentials (up to 15s) before saving anything — a wrong password redisplays
 the form with an error rather than persisting bad credentials. On success the
 portal closes, the AP shuts down, and the device proceeds as a normal WiFi
 client. The portal starts when `wifi_ssid` is empty in NVS, or when a
-saved WiFi network fails to connect **10 consecutive attempts** in a row
-(backoff-capped at 60s/attempt, so roughly 5 minutes of retrying first) —
+saved WiFi network reaches **10 consecutive connection attempts** without connecting
+(with exponential backoff between attempts) —
 either way the credentials on file are left untouched unless the portal
 succeeds, so a transient outage doesn't erase working config, and the
 always-on settings page (below) is briefly stopped and restarted around
@@ -77,6 +77,15 @@ reach, so `firmware_url` is settable here too — it has no authentication
 beyond being on your LAN at all, so anyone on your network can point the
 device at a firmware image of their choosing and trigger an install. It also
 links to `/logs` (recent log output, plain text).
+
+Under **WiFi setup**, choose **Reset WiFi and open setup** to forget the saved
+network and restart into the `NeoFrame-XXXXXX` setup hotspot (password
+`1234567890`, setup page `http://192.168.4.1/`). Image URLs, schedules and other
+settings are retained. The reset must be saved successfully before restarting;
+a storage failure retains the live credentials and is reported in `/logs`.
+This is also available as serial command `wifi-reset` or POST `/wifi-reset`.
+Like the other settings actions it is accessible to devices on the LAN without
+separate authentication. The settings page is unavailable during deep sleep.
 
 The same effect as "Force reload now" is available over serial at any time:
 send the literal line `force` (not JSON) to bypass both the poll interval
@@ -111,9 +120,7 @@ reported without automatically erasing the partition.
 
 ## Firmware updates (OTA)
 
-Set `firmware_url` over serial or the always-on settings page (never through
-the remote `config_url` path - the AP-mode portal's form doesn't currently
-have a field for it either, only used for first-time setup) to an
+Set `firmware_url` over serial or the always-on settings page to an
 `http://` or `https://` URL serving an ESP-IDF app image. Trigger a check either by
 sending the literal serial line `ota`, or via "Check & install firmware
 update now" on the always-on settings page (which only ever fetches the URL
@@ -127,8 +134,7 @@ Rollback safety: `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` is on, and a freshly
 flashed OTA image stays in `ESP_OTA_IMG_PENDING_VERIFY` until the device
 successfully connects to WiFi at least once (`nf_ota_confirm_healthy`) — if
 it never gets that far (crash-loops, bad build), the bootloader automatically
-reverts to the previous slot on the next boot. There is currently no
-automatic/periodic OTA check; it is manual-trigger-only in this build.
+reverts to the previous slot on the next boot. Remote settings can also request automatic OTA as described below.
 
 ## Logging
 
@@ -218,7 +224,7 @@ validated, stored, and settable through the captive portal or serial/remote
 config, but has no runtime behavior yet.
 
 Everything else originally deferred here has since shipped ahead of that gate
-at the user's explicit request: OTA (manual-trigger only, see above),
+at the user's explicit request: OTA (manual or remote-settings triggered, see above),
 pause/resume (automatic *light* sleep, WiFi stays associated - see
 "Pause / resume" above), and now true timer-based deep sleep with
 active-window/cron-style schedule enforcement and panel power-rail gating
@@ -265,6 +271,16 @@ pixel/geometry helpers and HTTP adapter with simulated NVS/network failures. The
 not emulate the radio, real NVS power loss, FreeRTOS scheduling or panel electronics.
 
 ## Scheduled deep sleep
+
+**Power-on/reboot recovery:** after a cold start, reset button or software reboot,
+the settings page stays available for at least five minutes after WiFi connects,
+even with `low_power` selected or outside the active schedule. Connection time and
+initial captive-portal setup do not consume this window. You can edit settings or
+use the WiFi-reset button during it; choosing `always_on` or `ac_power` keeps the
+device awake afterward. Low-power image updates begin after this recovery window.
+Normal scheduled timer wakes skip the window and perform the usual update/sleep
+cycle. If WiFi cannot connect after a manual reboot, the normal 10-attempt portal
+fallback runs while the device remains awake.
 
 Choose “Edit sleep schedule JSON” on the settings page to paste a schema.
 Set Settings URL on the main page to your server's JSON endpoint for automatic
@@ -329,3 +345,39 @@ Network/time acquisition is bounded; without a valid clock, rendering is skipped
 and retried after update_interval_s (600 seconds by default). The panel rail is
 held off during sleep. Actual power consumption and wake reliability still need
 hardware verification. Host tests cover parser and schedule behavior.
+
+### Remote OTA during scheduled wakes
+
+Add both fields to your existing complete settings JSON:
+
+```json
+{
+  "firmware_version": "release-20260930",
+  "firmware_url": "http://your-server/neoframe.bin"
+}
+```
+
+These are extra fields, not a replacement for the schedule/settings payload.
+`firmware_version` must exactly match the binary's embedded ESP-IDF project
+version (at most 31 bytes). Build it with
+`idf.py -DPROJECT_VER=release-20260930 build` and serve `build/neoframe.bin`.
+Plain HTTP is supported.
+
+In `low_power`, each wake fetches and saves settings, checks the requested
+firmware, then considers pause and rendering. OTA therefore works while
+`paused` is true. No download occurs when that version is already running.
+The binary's embedded version must match the requested version before it can
+be installed. Failures preserve the running firmware and retry on a later
+cycle, including when the settings service returns HTTP 304. Saved requests
+also survive reboot and temporary settings-server failures.
+
+In `ac_power` and `always_on`, the request is checked when queued remote
+settings are applied in the normal polling loop. The local Pause button
+suspends that loop; remote `paused` in `ac_power` only suppresses rendering.
+Remove both firmware fields from the settings response to cancel future
+automatic attempts, or send an empty `firmware_version` with the URL.
+
+Sleeping devices check only at scheduled wakes. An overnight inactive period
+still delays an update until the next scheduled wake; no separate maintenance
+wake interval is added. Existing v1/v2 saved settings migrate without requiring
+WiFi provisioning again.

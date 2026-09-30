@@ -10,3 +10,6 @@ build/host-tests/config
 cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -g \
     -Itests/stubs -Imain tests/test_http.c main/http.c -o build/host-tests/http
 build/host-tests/http
+cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -g \
+    -Itests/stubs -Imain tests/test_ota.c main/ota.c -o build/host-tests/ota
+build/host-tests/ota

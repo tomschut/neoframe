@@ -25,9 +25,17 @@ static unsigned duration(const char *s) {
     n*=*end=='m'?60:3600;
     return n>=180 && n<=86400 ? n:0;
 }
+esp_err_t nf_config_reset_wifi(nf_config *c) {
+    nf_config next=*c;
+    memset(next.wifi_ssid,0,sizeof(next.wifi_ssid));
+    memset(next.wifi_pass,0,sizeof(next.wifi_pass));
+    esp_err_t e=nf_config_save(&next);
+    if (e==ESP_OK) *c=next;
+    return e;
+}
 void nf_config_default(nf_config *c) {
     memset(c, 0, sizeof(*c));
-    c->version = 2; c->update_interval_s = 600; c->led_enabled = 1;
+    c->version = 3; c->update_interval_s = 600; c->led_enabled = 1;
     strcpy(c->active_start, "08:00"); strcpy(c->active_end, "00:00");
     strcpy(c->power_profile, "always_on");
     strcpy(c->timezone, "CET-1CEST,M3.5.0,M10.5.0/3");
@@ -35,7 +43,7 @@ void nf_config_default(nf_config *c) {
 bool nf_config_valid(const nf_config *c) {
 #define TERMINATED(f) if (!memchr(c->f, 0, sizeof(c->f))) return false
     TERMINATED(wifi_ssid); TERMINATED(wifi_pass); TERMINATED(image_url); TERMINATED(config_url);
-    TERMINATED(timezone); TERMINATED(firmware_url); TERMINATED(active_start); TERMINATED(active_end); TERMINATED(power_profile);
+    TERMINATED(firmware_version); TERMINATED(timezone); TERMINATED(firmware_url); TERMINATED(active_start); TERMINATED(active_end); TERMINATED(power_profile);
 #undef TERMINATED
     if (c->window_count>NF_MAX_WINDOWS) return false;
     for (unsigned i=0;i<c->window_count;i++) {
@@ -48,9 +56,9 @@ bool nf_config_valid(const nf_config *c) {
     if (n && n < 8) return false;
     if (n == 64) for (size_t i = 0; i < n; ++i)
         if (!strchr("0123456789abcdefABCDEF", c->wifi_pass[i])) return false;
-    return c->version == 2 && c->paused <= 1 && *c->timezone && c->update_interval_s >= NF_MIN_INTERVAL && c->update_interval_s <= NF_DAY &&
+    return c->version == 3 && c->paused <= 1 && *c->timezone && c->update_interval_s >= NF_MIN_INTERVAL && c->update_interval_s <= NF_DAY &&
         nf_url_valid(c->image_url, true) && nf_url_valid(c->config_url, true) &&
-        nf_url_valid(c->firmware_url, true) &&
+        nf_url_valid(c->firmware_url, true) && (!*c->firmware_version || *c->firmware_url) &&
         nf_time_valid(c->active_start) && nf_time_valid(c->active_end) && c->led_enabled <= 1 &&
         (!strcmp(c->power_profile, "low_power") || !strcmp(c->power_profile, "always_on") ||
             !strcmp(c->power_profile, "ac_power"));
@@ -65,6 +73,10 @@ bool nf_config_parse(const char *json, const nf_config *base, nf_config *out, bo
     /* Require the complete documented remote contract; never apply half a response. */
     const char *required[] = {"update_interval_s", "active_start", "active_end", "image_url", "led_enabled"};
     if (remote) {
+        cJSON *v=cJSON_GetObjectItemCaseSensitive(root,"firmware_version");
+        cJSON *u=cJSON_GetObjectItemCaseSensitive(root,"firmware_url");
+        if (!!v != !!u) ok=false;
+        memset(next.firmware_version,0,sizeof(next.firmware_version));
         if (cJSON_GetObjectItemCaseSensitive(root,"schedule")) {
             const char *required_schedule[]={"schedule","timezone","paused","image_url","power_profile"};
             for (unsigned i=0;i<5;i++) if (!cJSON_GetObjectItemCaseSensitive(root,required_schedule[i])) ok=false;
@@ -79,9 +91,9 @@ bool nf_config_parse(const char *json, const nf_config *base, nf_config *out, bo
     if (!cJSON_IsString(item) || strlen(item->valuestring) >= sizeof(next.f)) ok = false; \
     else strcpy(next.f, item->valuestring); \
 }
-        if (!strcmp(k, "wifi_ssid") || !strcmp(k, "wifi_pass") || !strcmp(k, "config_url") || !strcmp(k, "firmware_url")) {
+        if (!strcmp(k, "wifi_ssid") || !strcmp(k, "wifi_pass") || !strcmp(k, "config_url")) {
             if (remote) { ok = false; continue; }
-            STR_FIELD(wifi_ssid) else STR_FIELD(wifi_pass) else STR_FIELD(config_url) else STR_FIELD(firmware_url)
+            STR_FIELD(wifi_ssid) else STR_FIELD(wifi_pass) else STR_FIELD(config_url)
         } else if (!strcmp(k,"schedule")) {
             if (!cJSON_IsArray(item) || cJSON_GetArraySize(item)<1 || cJSON_GetArraySize(item)>NF_MAX_WINDOWS) { ok=false; continue; }
             next.window_count=0; memset(next.windows,0,sizeof(next.windows));
@@ -98,7 +110,9 @@ bool nf_config_parse(const char *json, const nf_config *base, nf_config *out, bo
                 strcpy(w->start,start->valuestring); strcpy(w->stop,stop->valuestring);
                 w->days=day_mask(days->valuestring); w->interval_s=duration(every->valuestring);
             }
-        } else STR_FIELD(image_url)
+        } else STR_FIELD(firmware_url)
+        else STR_FIELD(firmware_version)
+        else STR_FIELD(image_url)
         else STR_FIELD(active_start)
         else STR_FIELD(active_end)
         else STR_FIELD(power_profile)
@@ -140,11 +154,13 @@ esp_err_t nf_config_load(nf_config *c) {
     /* v1 used this exact prefix, rounded to four-byte struct alignment. */
     size_t legacy_size = (offsetof(nf_config, timezone) + 3) & ~(size_t)3;
     if (stored.version == 1 && n == legacy_size) {
-        stored.version=2;
+        stored.version=3;
         strcpy(stored.timezone,"CET-1CEST,M3.5.0,M10.5.0/3");
         stored.paused=0;
         /* Old low_power was inert: do not put an existing wall device to sleep on upgrade. */
         strcpy(stored.power_profile,"always_on");
+    } else if (stored.version==2 && n==offsetof(nf_config,firmware_version)) {
+        stored.version=3;
     } else if (n != sizeof(stored)) return ESP_ERR_INVALID_ARG;
     if (!nf_config_valid(&stored)) return ESP_ERR_INVALID_ARG;
     *c = stored; return ESP_OK;

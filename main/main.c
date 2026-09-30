@@ -98,7 +98,10 @@ static void settings_task(void *arg) {
         if (!r) { ESP_LOGW(TAG,"Settings allocation failed; ignored"); continue; }
         r->generation=job.generation; r->validator=received;
         memcpy(r->json,json,n); r->json[n]=0;
-        if (xQueueSend(settings_results,&r,0)!=pdTRUE) free(r);
+        if (xQueueSend(settings_results,&r,0)!=pdTRUE) {
+            ESP_LOGW(TAG,"Settings result queue full; response discarded");
+            free(r);
+        } else ESP_LOGI(TAG,"Settings fetched: HTTP 200, %u bytes; queued for next poll",(unsigned)n);
     }
 }
 static bool apply(nf_config *c, const char *json, bool remote, uint32_t *generation) {
@@ -134,6 +137,7 @@ static bool provision(nf_config *c, QueueHandle_t serial_messages) {
     return true;
 }
 void app_main(void) {
+    const bool timer_wake=esp_sleep_get_wakeup_cause()==ESP_SLEEP_WAKEUP_TIMER;
     gpio_deep_sleep_hold_dis();
     gpio_hold_dis(GPIO_NUM_45);
     nf_logbuf_init();
@@ -172,7 +176,7 @@ void app_main(void) {
      * seconds. Only (re)apply credentials if we're not already online. */
     if (!online()) credentials(&c);
     sntp_setoperatingmode(SNTP_OPMODE_POLL); sntp_setservername(0,"pool.ntp.org"); sntp_init();
-    if (!strcmp(c.power_profile,"low_power")) nf_lowpower_cycle(&c);
+    if (timer_wake && !strcmp(c.power_profile,"low_power")) nf_lowpower_cycle(&c);
     /* settings_job (~2.6KB) plus its own json[4096] local leaves too little
      * margin on 8192 given how this project has already been bitten twice by
      * exactly this kind of tight stack budget - generous headroom instead. */
@@ -181,6 +185,7 @@ void app_main(void) {
     /* Always-on settings page: safe to start unconditionally here, since any
      * captive-portal HTTP server above has already been stopped by now. */
     bool paused=false;
+    int64_t settings_ready_at=-1;
     if (nf_webui_start(&c,serial_messages,&paused)!=ESP_OK)
         ESP_LOGW(TAG,"Settings page unavailable; serial configuration still works");
     uint8_t *candidate=heap_caps_malloc(NF_FRAME_SIZE,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
@@ -202,6 +207,15 @@ void app_main(void) {
             if (!strcmp(line,"force")) {
                 render_after=0; next_poll=0;
                 ESP_LOGW(TAG,"Forced refresh requested via serial (debug)");
+            } else if (!strcmp(line,"wifi-reset")) {
+                esp_err_t reset_error=nf_config_reset_wifi(&c);
+                if (reset_error==ESP_OK) {
+                    ESP_LOGI(TAG,"WiFi credentials cleared; restarting into setup portal");
+                    /* Let the HTTP handler deliver its queued-response page. */
+                    vTaskDelay(pdMS_TO_TICKS(1000));
+                    nf_panel_sleep();
+                    esp_restart();
+                } else ESP_LOGE(TAG,"WiFi reset failed; credentials retained: %s",esp_err_to_name(reset_error));
             } else if (!strcmp(line,"ota")) {
                 if (*c.firmware_url) {
                     esp_err_t oe=nf_ota_check_and_apply(c.firmware_url);
@@ -222,7 +236,14 @@ void app_main(void) {
             } else if (apply(&c,line,false,&generation)) { next_poll=0; connect_at=0; backoff=1; }
             free(line);
         }
-        if (!strcmp(c.power_profile,"low_power")) {
+        /* Count usable settings time, so a slow connection or portal setup
+         * does not consume the five-minute reboot recovery window. */
+        if (settings_ready_at<0 && online()) {
+            settings_ready_at=seconds();
+            if (!timer_wake) ESP_LOGI(TAG,"Boot settings window: staying awake for %u seconds",NF_BOOT_SETTINGS_SECONDS);
+        }
+        if (!strcmp(c.power_profile,"low_power") &&
+            !nf_boot_settings_pending(timer_wake,settings_ready_at,seconds())) {
             nf_webui_stop();
             nf_lowpower_cycle(&c);
             nf_webui_start(&c,serial_messages,&paused);
@@ -245,6 +266,13 @@ void app_main(void) {
                 failed_connects=0; backoff=1; connect_at=0;
             }
         }
+        /* Low-power operation owns its render/schedule/rail lifecycle. During
+         * boot recovery, service configuration and WiFi without running a
+         * second display cycle or initializing the SPI bus twice. */
+        if (!strcmp(c.power_profile,"low_power")) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
         bool ac_mode=!strcmp(c.power_profile,"ac_power");
         if (ac_mode) { setenv("TZ",c.timezone,1); tzset(); }
         bool ac_clock_ok=time(NULL)>=1700000000;
@@ -257,9 +285,14 @@ void app_main(void) {
         if (!paused && now>=next_poll && now>=render_after && candidate && cached) {
             settings_result *r;
             while (xQueueReceive(settings_results,&r,0)==pdTRUE) {
-                if (r->generation==generation && apply(&c,r->json,true,&generation)) config_validator=r->validator;
+                if (r->generation==generation && apply(&c,r->json,true,&generation)) {
+                    config_validator=r->validator;
+                    ESP_LOGI(TAG,"Remote settings applied: profile=%s, paused=%s, windows=%u",
+                        c.power_profile,c.paused?"true":"false",(unsigned)c.window_count);
+                }
                 free(r);
             }
+            if (online()) nf_ota_apply_requested(c.firmware_url,c.firmware_version);
             if (strcmp(validator_url,c.image_url)) {
                 memset(&validator,0,sizeof(validator)); strcpy(validator_url,c.image_url);
             }

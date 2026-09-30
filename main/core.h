@@ -7,9 +7,11 @@
 #define NF_ROWS 1600
 #define NF_MIN_INTERVAL 180
 #define NF_DAY 86400
-/* Consecutive failed STA connect attempts (not elapsed time - backoff caps
- * at 60s/attempt) before falling back to the captive portal. At ~10
- * attempts that's roughly 5 minutes of retrying first. */
+#define NF_BOOT_SETTINGS_SECONDS 300
+/* ready_since < 0 means WiFi/settings access has not become available yet. */
+bool nf_boot_settings_pending(bool timer_wake, int64_t ready_since, int64_t now);
+/* STA connection attempts without obtaining an IP before portal fallback.
+ * Attempts use exponential backoff, capped at 60 seconds. */
 #define NF_MAX_CONNECT_FAILURES 10
 bool nf_pixels_valid(const uint8_t *data, size_t size);
 size_t nf_row_offset(unsigned controller, unsigned row);

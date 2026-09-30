@@ -17,7 +17,7 @@ void nf_ota_confirm_healthy(void) {
     }
 }
 
-esp_err_t nf_ota_check_and_apply(const char *firmware_url) {
+static esp_err_t install(const char *firmware_url, const char *expected) {
     if (!firmware_url || (strncmp(firmware_url, "http://", 7) && strncmp(firmware_url, "https://", 8)))
         return ESP_ERR_INVALID_ARG;
     bool secure = !strncmp(firmware_url, "https://", 8);
@@ -33,7 +33,15 @@ esp_err_t nf_ota_check_and_apply(const char *firmware_url) {
     if (e != ESP_OK) { ESP_LOGE(TAG, "OTA start failed: %s", esp_err_to_name(e)); return e; }
 
     esp_app_desc_t new_desc;
-    if (esp_https_ota_get_img_desc(handle, &new_desc) == ESP_OK) {
+    e=esp_https_ota_get_img_desc(handle, &new_desc);
+    if (e!=ESP_OK || !memchr(new_desc.version,0,sizeof(new_desc.version))) {
+        esp_https_ota_abort(handle); return e!=ESP_OK ? e : ESP_ERR_INVALID_RESPONSE;
+    }
+    if (expected && strcmp(expected,new_desc.version)) {
+        ESP_LOGE(TAG,"OTA version mismatch: requested %s, binary %s",expected,new_desc.version);
+        esp_https_ota_abort(handle); return ESP_ERR_INVALID_RESPONSE;
+    }
+    {
         esp_app_desc_t running_desc;
         if (esp_ota_get_partition_description(esp_ota_get_running_partition(), &running_desc) == ESP_OK &&
             !strcmp(new_desc.version, running_desc.version)) {
@@ -55,4 +63,18 @@ esp_err_t nf_ota_check_and_apply(const char *firmware_url) {
 
     ESP_LOGI(TAG, "OTA applied (%s); rebooting", new_desc.version);
     esp_restart();
+}
+
+esp_err_t nf_ota_check_and_apply(const char *url) { return install(url,NULL); }
+esp_err_t nf_ota_apply_requested(const char *url,const char *version) {
+    if (!version || !*version) return ESP_OK;
+    const esp_app_desc_t *running=esp_ota_get_app_description();
+    if (!strcmp(version,running->version)) {
+        ESP_LOGI(TAG,"Requested firmware already installed: %s",version);
+        return ESP_OK;
+    }
+    ESP_LOGI(TAG,"Remote OTA requested: %s -> %s",running->version,version);
+    esp_err_t e=install(url,version);
+    if (e!=ESP_OK) ESP_LOGW(TAG,"Remote OTA failed: %s; retry on next settings cycle",esp_err_to_name(e));
+    return e;
 }

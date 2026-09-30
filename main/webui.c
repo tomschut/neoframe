@@ -34,9 +34,9 @@ static esp_err_t send_page(httpd_req_t *req) {
     char version[64];
     nf_html_escape(app?app->version:"unknown",version,sizeof(version));
 
-    char *html=malloc(6144);
+    char *html=malloc(8192);
     if (!html) return httpd_resp_send_500(req);
-    int n=snprintf(html,6144,
+    int n=snprintf(html,8192,
         "<!doctype html><title>NeoFrame settings</title>"
         "<meta name=viewport content=\"width=device-width,initial-scale=1\">"
         "<style>body{font-family:sans-serif;max-width:420px;margin:24px auto;padding:0 16px}"
@@ -75,6 +75,10 @@ static esp_err_t send_page(httpd_req_t *req) {
         "<form method=post action=/%s>"
         "<button type=submit>%s</button>"
         "</form>"
+        "<h3>WiFi setup</h3><p>Forget the saved WiFi network and restart into "
+        "the setup hotspot. Your image settings and schedule will be kept.</p>"
+        "<form method=post action=/wifi-reset>"
+        "<button type=submit>Reset WiFi and open setup</button></form>"
         "<h3>Logs</h3><p><a href=/logs>View recent log output</a></p>",
         *s_error?"<div class=err>":"", s_error, *s_error?"</div>":"",
         image_url, config_url, (int)(s_config->update_interval_s/60),
@@ -87,7 +91,7 @@ static esp_err_t send_page(httpd_req_t *req) {
         s_paused&&*s_paused?"Paused":"Active",
         s_paused&&*s_paused?"resume":"pause",
         s_paused&&*s_paused?"Resume":"Pause");
-    if (n<0 || n>=6144) { free(html); return httpd_resp_send_500(req); }
+    if (n<0 || n>=8192) { free(html); return httpd_resp_send_500(req); }
     httpd_resp_set_type(req,"text/html");
     httpd_resp_send(req,html,n);
     free(html);
@@ -219,6 +223,24 @@ static esp_err_t handle_ota(httpd_req_t *req) {
     return ESP_OK;
 }
 
+static esp_err_t handle_wifi_reset(httpd_req_t *req) {
+    if (enqueue("wifi-reset")!=ESP_OK) {
+        httpd_resp_set_status(req,"503 Service Unavailable");
+        httpd_resp_set_type(req,"text/plain");
+        return httpd_resp_sendstr(req,"WiFi reset could not be queued. Please try again.");
+    }
+    httpd_resp_set_type(req,"text/html");
+    return httpd_resp_sendstr(req,
+        "<!doctype html><title>NeoFrame WiFi setup</title>"
+        "<meta name=viewport content='width=device-width,initial-scale=1'>"
+        "<body style='font-family:sans-serif;max-width:420px;margin:40px auto;padding:0 16px'>"
+        "<h2>WiFi reset requested</h2><p>After saving the reset, NeoFrame will restart "
+        "and disconnect from this network.</p><p>Connect to the <strong>NeoFrame-XXXXXX</strong> "
+        "hotspot using password <strong>1234567890</strong>, then open "
+        "<strong>http://192.168.4.1/</strong> to choose a WiFi network.</p>"
+        "<p>If the device stays on this network, check <a href=/logs>the logs</a> for a storage error.</p>");
+}
+
 static esp_err_t handle_logs(httpd_req_t *req) {
     char *buf=malloc(16*1024+1);
     if (!buf) return httpd_resp_send_500(req);
@@ -270,6 +292,8 @@ esp_err_t nf_webui_start(const nf_config *config, QueueHandle_t serial_messages,
     httpd_uri_t resume={.uri="/resume",.method=HTTP_POST,.handler=handle_resume};
     httpd_uri_t schedule_get={.uri="/schedule",.method=HTTP_GET,.handler=handle_schedule};
     httpd_uri_t schedule_post={.uri="/schedule",.method=HTTP_POST,.handler=handle_schedule};
+    httpd_uri_t wifi_reset={.uri="/wifi-reset",.method=HTTP_POST,.handler=handle_wifi_reset};
+    httpd_register_uri_handler(s_server,&wifi_reset);
     httpd_register_uri_handler(s_server,&schedule_get);
     httpd_register_uri_handler(s_server,&schedule_post);
     httpd_register_uri_handler(s_server,&root);
