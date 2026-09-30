@@ -443,7 +443,26 @@ cycle. The settings service does not contact the binary server itself.
 
 ### Windows (PowerShell)
 
-Open PowerShell in your NeoFrame checkout and start the server:
+First open an **ESP-IDF 4.4.4 PowerShell environment** (with the ESP32-S3 tools
+installed), then change to your NeoFrame checkout. Build with a distinct release
+version:
+
+```powershell
+$firmwareVersion = "release-20260930"
+idf.py -DPROJECT_VER=$firmwareVersion build
+if ($LASTEXITCODE -ne 0) { throw "Firmware build failed" }
+Write-Output "Firmware version for Home Assistant: $firmwareVersion"
+Write-Output "Firmware binary: $((Resolve-Path .\build\neoframe.bin).Path)"
+```
+
+Use a new version for each release and copy that exact value into Home
+Assistant's **Firmware version** field. Run this in the configured ESP32-S3
+project; a plain PowerShell window without the ESP-IDF environment will not
+find `idf.py`. If the checkout contains a `build` directory copied from Linux,
+rename or remove that generated directory before building on Windows, because
+its CMake cache contains paths from the other machine.
+
+After a successful build, start the server from your checkout:
 
 ```powershell
 py -3 -m http.server 8000 --bind 0.0.0.0 --directory .\build
