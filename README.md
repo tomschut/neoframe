@@ -440,3 +440,36 @@ if the firmware fields are missing. Leave both fields empty to cancel automatic
 updates. An offline server, failed download, or mismatched firmware version
 leaves the current firmware installed; the frame retries on a later scheduled
 cycle. The settings service does not contact the binary server itself.
+
+### Windows (PowerShell)
+
+Open PowerShell in your NeoFrame checkout and start the server:
+
+```powershell
+py -3 -m http.server 8000 --bind 0.0.0.0 --directory .\build
+```
+
+If Python is installed as `python` rather than the `py` launcher, substitute
+`python` for `py -3`. Keep this window open. If port 8000 is occupied, stop the
+existing server first. Allow Python through Windows Firewall on your private
+network if prompted.
+
+In a second PowerShell window, print the update URL using the local address
+selected for reaching the frame. Replace the frame IP below if it has changed:
+
+```powershell
+$frameIp = "192.168.2.27"
+$connection = [System.Net.Sockets.UdpClient]::new()
+try {
+    $connection.Connect($frameIp, 80)
+    $firmwareHostIp = $connection.Client.LocalEndPoint.Address.ToString()
+    Write-Output "Firmware URL: http://${firmwareHostIp}:8000/neoframe.bin"
+}
+finally {
+    $connection.Dispose()
+}
+```
+
+Copy the printed URL into Home Assistant's **Firmware URL** field. This only
+selects the local address; it does not verify access from the frame's network.
+The **Firmware version** still needs to match the binary's embedded version.
