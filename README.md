@@ -390,6 +390,22 @@ From a terminal on the computer containing this checkout:
 python3 -m http.server 8000 --bind 0.0.0.0 --directory /home/tom/devenv/neoframe/build
 ```
 
+In another terminal, print the firmware URL using the local address selected
+for reaching the frame (replace `192.168.2.27` if the frame's IP changes):
+
+```sh
+python3 - <<'PYURL'
+import socket
+with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as connection:
+    connection.connect(("192.168.2.27", 80))
+    address = connection.getsockname()[0]
+print(f"Firmware URL: http://{address}:8000/neoframe.bin")
+PYURL
+```
+
+This selects the local address without sending a request to the frame. It does
+not verify that routing or firewall rules allow the frame to reach the server.
+
 Keep the terminal open and the computer awake until the frame has downloaded
 its update. Stop the server with Ctrl+C. This serves the build directory over
 plain HTTP; no HTTPS setup is needed. If port 8000 is already occupied, stop the existing server first or configure it
