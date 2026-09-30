@@ -6,7 +6,7 @@
 #include <string.h>
 static esp_app_desc_t running={.version="old"}, offered={.version="new"};
 static int began,aborted,finished,performed;
-static esp_err_t desc_error,download_error,finish_error;
+static esp_err_t begin_error,desc_error,download_error,finish_error;
 static bool complete=true;
 static jmp_buf reboot;
 const char *esp_err_to_name(esp_err_t e) { (void)e; return "test-error"; }
@@ -19,7 +19,7 @@ const esp_app_desc_t *esp_ota_get_app_description(void) { return &running; }
 _Noreturn void esp_restart(void) { longjmp(reboot,1); }
 esp_err_t esp_https_ota_begin(const esp_https_ota_config_t *c,esp_https_ota_handle_t *h) {
  assert(!strcmp(c->http_config->url,"http://host/fw.bin"));
- assert(!c->http_config->crt_bundle_attach); began++; *h=&began;return ESP_OK;
+ assert(!c->http_config->crt_bundle_attach); began++; *h=&began;return begin_error;
 }
 esp_err_t esp_https_ota_get_img_desc(esp_https_ota_handle_t h,esp_app_desc_t *d) { (void)h;*d=offered;return desc_error; }
 esp_err_t esp_https_ota_abort(esp_https_ota_handle_t h) { (void)h;aborted++;return ESP_OK; }
@@ -30,6 +30,9 @@ int main(void) {
  const char *url="http://host/fw.bin";
  assert(nf_ota_apply_requested(url,"")==ESP_OK && !began);
  assert(nf_ota_apply_requested(url,"old")==ESP_OK && !began);
+ begin_error=ESP_ERR_TIMEOUT; assert(nf_ota_apply_requested(url,"new")==ESP_ERR_TIMEOUT && !performed && !finished);
+ begin_error=ESP_FAIL; assert(nf_ota_apply_requested(url,"new")==ESP_FAIL && !performed && !finished);
+ begin_error=ESP_OK;
  assert(nf_ota_apply_requested(url,"wrong")==ESP_ERR_INVALID_RESPONSE && aborted==1 && !performed);
  desc_error=ESP_FAIL; assert(nf_ota_apply_requested(url,"new")==ESP_FAIL && !performed); desc_error=ESP_OK;
  download_error=ESP_FAIL; assert(nf_ota_apply_requested(url,"new")==ESP_FAIL && !finished); download_error=ESP_OK;
