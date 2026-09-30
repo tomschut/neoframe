@@ -381,3 +381,45 @@ Sleeping devices check only at scheduled wakes. An overnight inactive period
 still delays an update until the next scheduled wake; no separate maintenance
 wake interval is added. Existing v1/v2 saved settings migrate without requiring
 WiFi provisioning again.
+
+### Host the firmware binary on your computer
+
+From a terminal on the computer containing this checkout:
+
+```sh
+python3 -m http.server 8001 --bind 0.0.0.0 --directory /home/tom/devenv/neoframe/build
+```
+
+Keep the terminal open and the computer awake until the frame has downloaded
+its update. Stop the server with Ctrl+C. This serves the build directory over
+plain HTTP; no HTTPS setup is needed. Use a free port if 8001 is already occupied.
+
+In Home Assistant, open the NeoFrame Settings integration's Configure dialog
+and fill in both optional firmware fields:
+
+- **Firmware URL:** `http://<computer-LAN-IP>:8001/neoframe.bin`
+- **Firmware version:** the exact embedded version used when building that binary.
+
+On 2026-09-30 this computer's address was `192.168.1.165`, so the URL was
+`http://192.168.1.165:8001/neoframe.bin`. The existing binary's embedded version
+was `remote-ota-20260929`. Addresses can change when switching WiFi networks.
+The frame must be able to reach that address and port: a server on a different
+subnet needs routing/firewall access between the networks. Prefer hosting on
+the same LAN as the frame. Allow inbound TCP port 8001 if your firewall blocks it.
+
+Check the download from another machine on the frame's network:
+
+```sh
+curl -f -o /tmp/neoframe.bin http://<computer-LAN-IP>:8001/neoframe.bin
+```
+
+Serve only the application binary `build/neoframe.bin`, not a full flash backup
+or bootloader. Build each new release with a distinct version, for example
+`idf.py -DPROJECT_VER=release-20260930 build`, then put that exact version in
+Home Assistant. A frame already running the requested version skips the download.
+
+Update the Home Assistant integration to version 1.1.0 or later and restart HA
+if the firmware fields are missing. Leave both fields empty to cancel automatic
+updates. An offline server, failed download, or mismatched firmware version
+leaves the current firmware installed; the frame retries on a later scheduled
+cycle. The settings service does not contact the binary server itself.
