@@ -387,30 +387,31 @@ WiFi provisioning again.
 From a terminal on the computer containing this checkout:
 
 ```sh
-python3 -m http.server 8001 --bind 0.0.0.0 --directory /home/tom/devenv/neoframe/build
+python3 -m http.server 8000 --bind 0.0.0.0 --directory /home/tom/devenv/neoframe/build
 ```
 
 Keep the terminal open and the computer awake until the frame has downloaded
 its update. Stop the server with Ctrl+C. This serves the build directory over
-plain HTTP; no HTTPS setup is needed. Use a free port if 8001 is already occupied.
+plain HTTP; no HTTPS setup is needed. If port 8000 is already occupied, stop the existing server first or configure it
+to serve this build directory.
 
 In Home Assistant, open the NeoFrame Settings integration's Configure dialog
 and fill in both optional firmware fields:
 
-- **Firmware URL:** `http://<computer-LAN-IP>:8001/neoframe.bin`
+- **Firmware URL:** `http://<computer-LAN-IP>:8000/neoframe.bin`
 - **Firmware version:** the exact embedded version used when building that binary.
 
 On 2026-09-30 this computer's address was `192.168.1.165`, so the URL was
-`http://192.168.1.165:8001/neoframe.bin`. The existing binary's embedded version
+`http://192.168.1.165:8000/neoframe.bin`. The existing binary's embedded version
 was `remote-ota-20260929`. Addresses can change when switching WiFi networks.
 The frame must be able to reach that address and port: a server on a different
 subnet needs routing/firewall access between the networks. Prefer hosting on
-the same LAN as the frame. Allow inbound TCP port 8001 if your firewall blocks it.
+the same LAN as the frame. Allow inbound TCP port 8000 if your firewall blocks it.
 
 Check the download from another machine on the frame's network:
 
 ```sh
-curl -f -o /tmp/neoframe.bin http://<computer-LAN-IP>:8001/neoframe.bin
+curl -f -o /tmp/neoframe.bin http://<computer-LAN-IP>:8000/neoframe.bin
 ```
 
 Serve only the application binary `build/neoframe.bin`, not a full flash backup
